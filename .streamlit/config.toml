@@ -7,11 +7,9 @@ textColor = "#E8E8F0"
 font = "sans serif"
 
 [server]
-port = 8502
 headless = true
 enableCORS = false
 enableXsrfProtection = false
 
 [browser]
 gatherUsageStats = false
-serverAddress = "localhost"
