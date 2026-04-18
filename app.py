@@ -972,11 +972,36 @@ with tabs[4]:
     <div style="font-size:18px; font-weight:700; margin-bottom:16px;">🎯 Props Finder</div>
     """, unsafe_allow_html=True)
 
+    # Manual sync + calculate button
+    pc1, pc2, _ = st.columns([2, 2, 6])
+    with pc1:
+        if st.button("🔄 Sync Props Now", use_container_width=True):
+            with st.spinner("Fetching prop odds..."):
+                try:
+                    import sys as _sys
+                    _sys.path.insert(0, "C:/NHL_Model")
+                    from sync.odds_sync import run_props_sync as _rps
+                    _rps()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Props sync error: {e}")
+    with pc2:
+        if st.button("⚡ Calculate Edges", use_container_width=True):
+            with st.spinner("Calculating prop edges..."):
+                try:
+                    import sys as _sys
+                    _sys.path.insert(0, "C:/NHL_Model")
+                    from models.edge_engine import calculate_all_prop_edges as _cape
+                    _cape()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Prop edge error: {e}")
+
     props_df = safe_fetch("props", limit=1000)
     inj_df   = safe_fetch("injuries")
 
     if props_df.empty:
-        st.info("No props data yet. Props sync pulls approximately every 30 minutes on game days.")
+        st.info("No props data yet — click Sync Props Now then Calculate Edges.")
     else:
         # Filter row
         fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])

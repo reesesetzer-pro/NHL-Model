@@ -10,6 +10,8 @@ import numpy as np
 from datetime import datetime, timezone
 from typing import Optional
 
+from datetime import date as _date
+
 from config import (
     EDGE_SOFT_THRESHOLD, EDGE_STRONG_THRESHOLD,
     ALTITUDE_TEAMS, ALTITUDE_MODIFIER,
@@ -236,51 +238,169 @@ def get_situational_modifier(game_id: str, outcome: str, market: str = "h2h") ->
     return modifier
 
 
-# ── Prop edge engine ──────────────────────────────────────────────────────────
+# ── Prop market constants ────────────────────────────────────────────────────
 
-def calculate_prop_edge(
-    player_name: str,
-    team_abbr: str,
-    market: str,
-    point: float,
-    game_id: str,
-) -> Optional[float]:
+PROP_MARKETS = {
+    "player_shots_on_goal",
+    "player_points",
+    "player_goals",
+    "player_assists",
+    "goalie_saves",
+}
+
+# Scoring prop markets that benefit from PP1 deployment
+_SCORING_PROPS = {"player_points", "player_goals", "player_assists"}
+
+
+# ── Prop edge pipeline ────────────────────────────────────────────────────────
+
+def calculate_all_prop_edges() -> list[dict]:
     """
-    Calculate prop edge using player stats vs market line.
-    Pulls season averages + situational modifiers.
+    Read prop odds from the odds table, calculate no-vig edges with
+    lineup-context adjustments, and write results to the props table.
+
+    Model approach (no player-level stats DB yet):
+      - No-vig market prob as base (sharp book consensus already embedded)
+      - PP unit 1 on scoring props: +3 pp
+      - Line 1 skaters: +2 pp
+      - Injured/doubtful players: suppressed (excluded)
+
+    The edge will be small unless there's a real lineup inefficiency;
+    this is intentional — props are listed so you can browse market
+    probabilities even when the pure edge is ~0.
     """
-    try:
-        # Pull lineup context for TOI
-        lineup = fetch("lineups")
-        player_row = lineup[lineup["player_name"].str.lower() == player_name.lower()] if not lineup.empty else pd.DataFrame()
+    now       = datetime.now(timezone.utc).isoformat()
+    today_str = _date.today().isoformat()
+    results   = []
 
-        line_num = int(player_row.iloc[0].get("line_number", 2)) if not player_row.empty else 2
-        pp_unit  = player_row.iloc[0].get("pp_unit") if not player_row.empty else None
-        toi      = float(player_row.iloc[0].get("toi_projection", 15.0)) if not player_row.empty else 15.0
+    games_df = fetch("games")
+    if games_df.empty:
+        return results
+    if "game_date" in games_df.columns:
+        games_df = games_df[games_df["game_date"] >= today_str]
+    if games_df.empty:
+        return results
 
-        # Without full historical player stats DB, use a simplified
-        # expected value model based on available context
-        market_no_vig = best_no_vig_prob(game_id, market, f"{player_name} Over {point}")
-        if market_no_vig is None:
-            return None
+    odds_df = fetch("odds", limit=15000)
+    if odds_df.empty:
+        return results
 
-        # Base model probability adjustments
-        model_prob = market_no_vig
+    prop_odds = odds_df[odds_df["market"].isin(PROP_MARKETS)]
+    if prop_odds.empty:
+        print("[edge] No prop odds in DB — run props sync first.")
+        return results
 
-        # PP unit 1 boost for point props
-        if pp_unit == 1 and market in ("player_points", "player_goals", "player_assists"):
-            model_prob += 0.03
+    lineup_df  = fetch("lineups")
+    injuries_df = fetch("injuries")
 
-        # Line 1 boost for shots and points
-        if line_num == 1:
-            model_prob += 0.02
+    # Index injuries for fast lookup
+    injured_names: set = set()
+    if not injuries_df.empty:
+        bad = injuries_df[injuries_df["status"].isin(["out", "doubtful"])]
+        injured_names = {n.lower() for n in bad["player_name"].dropna().tolist()}
 
-        edge = model_prob - market_no_vig
-        return round(edge, 4)
+    # Index lineup by player name (lower-case)
+    lineup_index: dict = {}
+    if not lineup_df.empty:
+        for _, lr in lineup_df.iterrows():
+            key = str(lr.get("player_name", "")).lower()
+            if key:
+                lineup_index[key] = lr
 
-    except Exception as e:
-        print(f"[edge] Prop edge error for {player_name}: {e}")
-        return None
+    today_gids = set(games_df["id"].tolist())
+
+    for market in PROP_MARKETS:
+        mkt_df = prop_odds[
+            (prop_odds["market"] == market) &
+            (prop_odds["game_id"].isin(today_gids))
+        ]
+        if mkt_df.empty:
+            continue
+
+        # Group Over outcomes — each Over has a mirror Under
+        over_outcomes = [o for o in mkt_df["outcome"].unique() if " Over" in o]
+
+        for over_outcome in over_outcomes:
+            player_name  = over_outcome.replace(" Over", "").strip()
+            under_outcome = over_outcome.replace(" Over", " Under")
+
+            over_rows  = mkt_df[mkt_df["outcome"] == over_outcome]
+            under_rows = mkt_df[mkt_df["outcome"] == under_outcome]
+
+            if over_rows.empty or under_rows.empty:
+                continue
+
+            # Best price for over, consensus for under
+            best_idx   = over_rows["price"].idxmax()
+            best_price = int(over_rows.loc[best_idx, "price"])
+            best_book  = str(over_rows.loc[best_idx, "book"])
+            game_id    = str(over_rows.iloc[0]["game_id"])
+
+            pts = over_rows["point"].dropna()
+            if pts.empty:
+                continue
+            point = float(pts.median())
+
+            opp_price  = float(under_rows["price"].mean())
+
+            # No-vig probability
+            our_imp = american_to_implied(best_price)
+            opp_imp = american_to_implied(int(opp_price))
+            if our_imp <= 0 or opp_imp <= 0:
+                continue
+            no_vig_over, _ = remove_vig(our_imp, opp_imp)
+            if no_vig_over is None or no_vig_over <= 0:
+                continue
+
+            # Skip injured players
+            if player_name.lower() in injured_names:
+                continue
+
+            # Lineup context
+            model_prob = no_vig_over
+            team_abbr  = ""
+            lr         = lineup_index.get(player_name.lower())
+            if lr is not None:
+                team_abbr = str(lr.get("team_abbr", ""))
+                line_num  = int(lr.get("line_number") or 3)
+                pp_unit   = lr.get("pp_unit")
+
+                if pp_unit == 1 and market in _SCORING_PROPS:
+                    model_prob += 0.03
+                if line_num == 1:
+                    model_prob += 0.02
+
+            # Clamp
+            model_prob = min(max(model_prob, 0.01), 0.99)
+            edge = model_prob - no_vig_over
+
+            prop_id = _make_id(game_id, market, player_name, "Over", today_str)
+            results.append({
+                "id":                 prop_id,
+                "game_id":            game_id,
+                "player_name":        player_name,
+                "team_abbr":          team_abbr,
+                "market":             market,
+                "outcome":            over_outcome,
+                "point":              point,
+                "book":               best_book,
+                "price":              best_price,
+                "model_prob":         round(model_prob, 4),
+                "market_prob_novig":  round(no_vig_over, 4),
+                "edge":               round(edge, 4),
+                "suppressed":         False,
+                "suppression_reason": None,
+                "updated_at":         now,
+            })
+
+    if results:
+        upsert("props", results, on_conflict="id")
+
+    scored = [r for r in results if r["market"] in _SCORING_PROPS]
+    shots  = [r for r in results if r["market"] == "player_shots_on_goal"]
+    saves  = [r for r in results if r["market"] == "goalie_saves"]
+    print(f"[edge] Props: {len(results)} total | "
+          f"{len(scored)} scoring | {len(shots)} shots | {len(saves)} saves")
 
 
 # ── Full game edge calculation ────────────────────────────────────────────────

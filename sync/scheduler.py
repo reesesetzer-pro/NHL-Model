@@ -23,6 +23,7 @@ from sync.injuries_sync    import run_injuries_sync
 from sync.lineups_sync     import run_lineups_sync
 from sync.series_sync      import run_series_sync
 from sync.moneypuck_sync   import run_moneypuck_sync
+from models.edge_engine    import calculate_all_edges, calculate_all_prop_edges
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,13 +36,15 @@ log = logging.getLogger("scheduler")
 def run_all() -> None:
     """Cold-start — run every sync immediately."""
     log.info("🏒 Cold-start sync...")
-    run_moneypuck_sync()   # team xG data first — needed by edge engine
-    run_series_sync()      # backfills game_type before odds parse
+    run_moneypuck_sync()        # team xG data first — needed by edge engine
+    run_series_sync()           # backfills game_type before odds parse
     run_injuries_sync()
     run_goalie_sync()
     run_lineups_sync()
     run_game_odds_sync()
+    calculate_all_edges()       # game-level edges → edges table
     run_props_sync()
+    calculate_all_prop_edges()  # prop edges → props table
     log.info("✅ Cold-start complete.")
 
 
@@ -103,6 +106,22 @@ def main() -> None:
         trigger=IntervalTrigger(seconds=SYNC_ODDS_INTERVAL),
         id="odds_props",
         name="Props Sync",
+        max_instances=1,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(
+        calculate_all_prop_edges,
+        trigger=IntervalTrigger(seconds=SYNC_ODDS_INTERVAL),
+        id="prop_edges",
+        name="Prop Edge Calc",
+        max_instances=1,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(
+        calculate_all_edges,
+        trigger=IntervalTrigger(seconds=SYNC_ODDS_INTERVAL),
+        id="game_edges",
+        name="Game Edge Calc",
         max_instances=1,
         misfire_grace_time=120,
     )
