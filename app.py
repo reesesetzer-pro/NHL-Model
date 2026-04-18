@@ -997,83 +997,239 @@ with tabs[4]:
                 except Exception as e:
                     st.error(f"Prop edge error: {e}")
 
-    props_df = safe_fetch("props", limit=1000)
+    props_df = safe_fetch("props", limit=2000)
     inj_df   = safe_fetch("injuries")
 
     if props_df.empty:
         st.info("No props data yet — click Sync Props Now then Calculate Edges.")
     else:
-        # Filter row
-        fc1, fc2, fc3, fc4 = st.columns([2, 2, 2, 2])
-        with fc1:
-            mkt_opts = ["All"] + sorted(props_df["market"].unique().tolist())
-            prop_mkt = st.selectbox("Market", mkt_opts)
-        with fc2:
-            min_edge = st.slider("Min Edge %", 0, 20, 0)
-        with fc3:
-            team_opts = ["All"] + sorted(props_df["team_abbr"].dropna().unique().tolist())
-            team_filter = st.selectbox("Team", team_opts)
-        with fc4:
-            book_opts = ["All"] + sorted(props_df["book"].unique().tolist())
-            book_filter = st.selectbox("Best Book", book_opts)
-
-        filtered = props_df.copy()
-        if prop_mkt != "All":
-            filtered = filtered[filtered["market"] == prop_mkt]
-        if min_edge > 0:
-            filtered = filtered[filtered["edge"] >= min_edge / 100]
-        if team_filter != "All":
-            filtered = filtered[filtered["team_abbr"] == team_filter]
-        if book_filter != "All":
-            filtered = filtered[filtered["book"] == book_filter]
-
-        # Flag injured players
+        # ── Remove injured players ────────────────────────────────────────────
         if not inj_df.empty:
             injured_names = set(inj_df[inj_df["status"].isin(["out","doubtful"])]["player_name"].tolist())
-            filtered["injured"] = filtered["player_name"].isin(injured_names)
-            filtered = filtered[~filtered["injured"]]
+            props_df = props_df[~props_df["player_name"].isin(injured_names)]
 
-        filtered = filtered.sort_values("edge", ascending=False)
+        # ── Probability tier helper ───────────────────────────────────────────
+        def prob_tier(p):
+            if p >= 0.72:   return "LOCK",   "#00FF88", "#00FF8820", "#00FF8840"
+            if p >= 0.62:   return "STRONG", "#4CAF50", "#4CAF5020", "#4CAF5040"
+            if p >= 0.55:   return "LEAN",   "#FFD700", "#FFD70020", "#FFD70040"
+            return          "FAIR",   "#666688", "#66668820", "#66668840"
 
-        if filtered.empty:
-            st.info("No props matching filters.")
-        else:
-            for _, row in filtered.head(50).iterrows():
-                edge_pct = float(row.get("edge", 0))
-                tier     = "strong" if edge_pct >= 0.07 else ("soft" if edge_pct >= 0.04 else "none")
-                mkt_clean = row["market"].replace("player_","").replace("_"," ").title()
-                book_clean = row["book"].replace("_bet","").replace("hardrockbet","hardrock")
+        def fair_odds(prob):
+            """No-vig implied prob → American odds string."""
+            if prob <= 0 or prob >= 1:
+                return "—"
+            if prob >= 0.5:
+                return f"{int(-prob/(1-prob)*100)}"
+            return f"+{int((1-prob)/prob*100)}"
 
+        def line_value(price, prob):
+            """Returns True if the market price beats fair value."""
+            from utils.helpers import american_to_implied
+            book_imp = american_to_implied(int(price))
+            return book_imp < prob  # book charging less juice than fair = value
+
+        # ── Layout: filters left, parlay builder right ────────────────────────
+        left_col, right_col = st.columns([3, 1])
+
+        with right_col:
+            st.markdown("""
+            <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:10px; padding:16px;">
+                <div style="font-size:12px; font-weight:700; color:#00D4FF; letter-spacing:1px; margin-bottom:12px;">
+                    PARLAY BUILDER
+                </div>
+            """, unsafe_allow_html=True)
+
+            if "parlay_legs" not in st.session_state:
+                st.session_state.parlay_legs = []
+
+            if st.session_state.parlay_legs:
+                combined_prob = 1.0
+                for leg in st.session_state.parlay_legs:
+                    combined_prob *= leg["prob"]
+                    mkt_s = leg["market"].replace("player_","").replace("_"," ").title()
+                    st.markdown(f"""
+                    <div style="border-bottom:1px solid #1A1A2A; padding:6px 0; font-size:11px;">
+                        <div style="color:#E2E2EE; font-weight:600;">{leg['player']}</div>
+                        <div style="color:#666688; font-family:'Space Mono',monospace;">{mkt_s} {leg['point']} · {leg['prob']*100:.0f}%</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                parlay_fair = fair_odds(combined_prob)
                 st.markdown(f"""
-                <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:8px;
-                            padding:12px 16px; margin-bottom:8px;
-                            display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-                    <div style="display:flex; align-items:center; gap:12px;">
-                        {team_badge(str(row.get('team_abbr','')), 28)}
-                        <div>
-                            <div style="font-size:14px; font-weight:600; color:#E2E2EE;">{row.get('player_name','')}</div>
-                            <div style="font-size:11px; color:#666688; font-family:'Space Mono',monospace;">
-                                {mkt_clean} · {row.get('outcome','')} {row.get('point','')}
-                            </div>
-                        </div>
-                    </div>
-                    <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
-                        <div style="text-align:center;">
-                            <div style="font-size:10px; color:#444466;">PRICE</div>
-                            <div class="mono" style="color:#B8B8D4;">{fmt_odds(row.get('price',0))}</div>
-                        </div>
-                        <div style="text-align:center;">
-                            <div style="font-size:10px; color:#444466;">BOOK</div>
-                            <div style="font-size:12px; color:#666688;">{book_clean}</div>
-                        </div>
-                        <div style="text-align:center;">
-                            <div style="font-size:10px; color:#444466;">NO-VIG PROB</div>
-                            <div class="mono" style="color:#B8B8D4;">{fmt_pct(row.get('market_prob_novig'))}</div>
-                        </div>
-                        <span class="edge-badge edge-{tier}">{edge_pct*100:.1f}% EDGE</span>
-                    </div>
+                <div style="margin-top:12px; padding-top:10px; border-top:1px solid #2E2E50;">
+                    <div style="font-size:10px; color:#444466; margin-bottom:4px;">COMBINED PROB</div>
+                    <div style="font-family:'Space Mono',monospace; font-size:20px; font-weight:700;
+                                color:#00FF88;">{combined_prob*100:.1f}%</div>
+                    <div style="font-size:10px; color:#444466; margin-top:6px;">FAIR PARLAY ODDS</div>
+                    <div style="font-family:'Space Mono',monospace; font-size:16px; color:#FFD700;">{parlay_fair}</div>
+                    <div style="font-size:9px; color:#444466; margin-top:4px;">{len(st.session_state.parlay_legs)}-leg parlay</div>
                 </div>
                 """, unsafe_allow_html=True)
+
+                if st.button("Clear Parlay", use_container_width=True):
+                    st.session_state.parlay_legs = []
+                    st.rerun()
+            else:
+                st.markdown("""
+                <div style="text-align:center; padding:20px 0; color:#444466; font-size:12px;">
+                    Click + on any prop<br>to build a parlay
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with left_col:
+            # Filters
+            fc1, fc2, fc3 = st.columns([2, 2, 2])
+            with fc1:
+                mkt_map = {
+                    "All Markets": "All",
+                    "Points": "player_points",
+                    "Goals": "player_goals",
+                    "Assists": "player_assists",
+                    "Shots on Goal": "player_shots_on_goal",
+                    "Goalie Saves": "goalie_saves",
+                }
+                prop_mkt_label = st.selectbox("Market", list(mkt_map.keys()))
+                prop_mkt = mkt_map[prop_mkt_label]
+            with fc2:
+                min_prob = st.select_slider(
+                    "Min Confidence",
+                    options=["Any", "Lean 55%+", "Strong 62%+", "Lock 72%+"],
+                    value="Any"
+                )
+            with fc3:
+                team_opts = ["All Teams"] + sorted(props_df["team_abbr"].dropna().unique().tolist())
+                team_filter = st.selectbox("Team", team_opts)
+
+            filtered = props_df.copy()
+            if prop_mkt != "All":
+                filtered = filtered[filtered["market"] == prop_mkt]
+            if team_filter != "All Teams":
+                filtered = filtered[filtered["team_abbr"] == team_filter]
+
+            # Probability threshold
+            prob_threshold = {"Any": 0.0, "Lean 55%+": 0.55, "Strong 62%+": 0.62, "Lock 72%+": 0.72}
+            min_p = prob_threshold.get(min_prob, 0.0)
+            if min_p > 0:
+                filtered = filtered[filtered["market_prob_novig"] >= min_p]
+
+            # Sort by probability descending
+            filtered = filtered.sort_values("market_prob_novig", ascending=False)
+
+            # ── Prop summary counts ───────────────────────────────────────────
+            locks   = len(filtered[filtered["market_prob_novig"] >= 0.72])
+            strongs = len(filtered[(filtered["market_prob_novig"] >= 0.62) & (filtered["market_prob_novig"] < 0.72)])
+            leans   = len(filtered[(filtered["market_prob_novig"] >= 0.55) & (filtered["market_prob_novig"] < 0.62)])
+
+            st.markdown(f"""
+            <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+                <span style="background:#00FF8815;border:1px solid #00FF8840;color:#00FF88;
+                             border-radius:4px;padding:4px 12px;font-size:11px;font-weight:700;
+                             font-family:'Space Mono',monospace;">
+                    LOCK: {locks}
+                </span>
+                <span style="background:#4CAF5015;border:1px solid #4CAF5040;color:#4CAF50;
+                             border-radius:4px;padding:4px 12px;font-size:11px;font-weight:700;
+                             font-family:'Space Mono',monospace;">
+                    STRONG: {strongs}
+                </span>
+                <span style="background:#FFD70015;border:1px solid #FFD70040;color:#FFD700;
+                             border-radius:4px;padding:4px 12px;font-size:11px;font-weight:700;
+                             font-family:'Space Mono',monospace;">
+                    LEAN: {leans}
+                </span>
+                <span style="color:#444466;font-size:11px;font-family:'Space Mono',monospace;padding:4px 0;">
+                    {len(filtered)} total props
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if filtered.empty:
+                st.info("No props matching filters.")
+            else:
+                for _, row in filtered.head(60).iterrows():
+                    prob       = float(row.get("market_prob_novig", 0))
+                    price      = int(row.get("price", 0))
+                    player     = str(row.get("player_name", ""))
+                    market     = str(row.get("market", ""))
+                    point      = row.get("point", "")
+                    abbr       = str(row.get("team_abbr", ""))
+                    book       = str(row.get("book","")).replace("_bet","").replace("hardrockbet","hardrock")
+                    mkt_clean  = market.replace("player_","").replace("_"," ").title()
+                    outcome    = str(row.get("outcome",""))
+
+                    label, color, bg, border = prob_tier(prob)
+                    fair       = fair_odds(prob)
+                    has_value  = line_value(price, prob)
+
+                    value_badge = ""
+                    if has_value:
+                        value_badge = f"<span style='background:#00D4FF15;border:1px solid #00D4FF40;color:#00D4FF;border-radius:3px;padding:2px 6px;font-size:9px;font-weight:700;font-family:Space Mono,monospace;'>LINE VALUE</span>"
+
+                    # Parlay add button
+                    btn_key = f"parlay_{player}_{market}_{point}"
+                    already_in = any(
+                        l["player"] == player and l["market"] == market
+                        for l in st.session_state.parlay_legs
+                    )
+
+                    col_card, col_btn = st.columns([11, 1])
+                    with col_card:
+                        st.markdown(f"""
+                        <div style="background:#0D0D18; border:1px solid {border};
+                                    border-left:3px solid {color};
+                                    border-radius:8px; padding:12px 16px; margin-bottom:6px;
+                                    display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                {team_badge(abbr, 28)}
+                                <div>
+                                    <div style="font-size:13px; font-weight:600; color:#E2E2EE;">{player}</div>
+                                    <div style="font-size:10px; color:#666688; font-family:'Space Mono',monospace;">
+                                        {mkt_clean} Over {point}
+                                    </div>
+                                    <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
+                                        <span style="background:{bg};border:1px solid {border};color:{color};
+                                                     border-radius:3px;padding:2px 6px;font-size:9px;font-weight:700;
+                                                     font-family:Space Mono,monospace;">{label}</span>
+                                        {value_badge}
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+                                <div style="text-align:center;">
+                                    <div style="font-size:9px; color:#444466; margin-bottom:2px;">PROBABILITY</div>
+                                    <div style="font-family:'Space Mono',monospace; font-size:18px; font-weight:700; color:{color};">{prob*100:.0f}%</div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:9px; color:#444466; margin-bottom:2px;">BEST PRICE</div>
+                                    <div style="font-family:'Space Mono',monospace; font-size:14px; color:#E2E2EE; font-weight:700;">{fmt_odds(price)}</div>
+                                    <div style="font-size:9px; color:#444466;">{book}</div>
+                                </div>
+                                <div style="text-align:center;">
+                                    <div style="font-size:9px; color:#444466; margin-bottom:2px;">FAIR ODDS</div>
+                                    <div style="font-family:'Space Mono',monospace; font-size:13px; color:#666688;">{fair}</div>
+                                </div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with col_btn:
+                        st.markdown("<div style='padding-top:8px;'>", unsafe_allow_html=True)
+                        if not already_in:
+                            if st.button("＋", key=btn_key, help=f"Add {player} to parlay"):
+                                st.session_state.parlay_legs.append({
+                                    "player": player,
+                                    "market": market,
+                                    "point":  point,
+                                    "prob":   prob,
+                                    "price":  price,
+                                    "book":   book,
+                                })
+                                st.rerun()
+                        else:
+                            st.markdown("<div style='font-size:16px;color:#00FF88;text-align:center;'>✓</div>", unsafe_allow_html=True)
+                        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
