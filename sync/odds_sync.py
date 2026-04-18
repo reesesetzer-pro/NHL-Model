@@ -113,6 +113,10 @@ def parse_and_store(events_with_odds: list[dict], is_props: bool = False) -> Non
         except Exception:
             game_date = datetime.now(ET).date().isoformat()
 
+        # The Odds API doesn't expose game_type directly; infer from sport_key context.
+        # Regular season = "2", playoffs = "3". Odds API uses same sport key for both —
+        # we mark games fetched during playoff dates as type 3 via series_sync cross-ref.
+        # Default to "2"; series_sync will backfill playoff game_type via game_id match.
         if not is_props:
             games_rows.append({
                 "id":           game_id,
@@ -123,6 +127,7 @@ def parse_and_store(events_with_odds: list[dict], is_props: bool = False) -> Non
                 "home_abbr":    home_abbr,
                 "away_abbr":    away_abbr,
                 "sport_key":    NHL_SPORT_KEY,
+                "game_type":    "2",  # backfilled to "3" by series_sync during playoffs
             })
 
         for bookmaker in event.get("bookmakers", []):

@@ -13,16 +13,85 @@ from typing import Optional
 from config import (
     EDGE_SOFT_THRESHOLD, EDGE_STRONG_THRESHOLD,
     ALTITUDE_TEAMS, ALTITUDE_MODIFIER,
+    PLAYOFF_HOME_ICE_MODIFIER, PLAYOFF_TOTALS_OVER_BOOST,
+    PLAYOFF_GAME7_HOME_MODIFIER, PLAYOFF_ELIM_ROAD_PENALTY,
 )
 from utils.db import upsert, fetch
 from utils.helpers import (
     american_to_implied, remove_vig, implied_to_american, format_odds
 )
 from models.kelly import kelly_criterion
+from models.win_probability import model_probability
 
 
 def _make_id(*parts) -> str:
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
+
+
+# ── Playoff series context ────────────────────────────────────────────────────
+
+def get_series_context(home_abbr: str, away_abbr: str) -> dict:
+    """
+    Pull current series record and game number for a matchup.
+    Returns dict with: game_number, home_wins, away_wins, is_elimination,
+    is_game7, home_is_away_in_series (True if home team is away seed).
+    """
+    defaults = {
+        "game_number": 1,
+        "home_wins": 0,
+        "away_wins": 0,
+        "is_elimination": False,
+        "is_game7": False,
+    }
+    try:
+        series_df = fetch("playoff_series")
+        if series_df.empty:
+            return defaults
+
+        mask = (
+            ((series_df["team1_abbr"] == home_abbr) & (series_df["team2_abbr"] == away_abbr)) |
+            ((series_df["team1_abbr"] == away_abbr) & (series_df["team2_abbr"] == home_abbr))
+        )
+        match = series_df[mask]
+        if match.empty:
+            return defaults
+
+        row = match.iloc[0]
+        t1  = row["team1_abbr"]
+        t1w = int(row.get("team1_wins", 0))
+        t2w = int(row.get("team2_wins", 0))
+        game_num = t1w + t2w + 1
+
+        home_wins = t1w if t1 == home_abbr else t2w
+        away_wins = t1w if t1 == away_abbr else t2w
+
+        is_game7    = (home_wins == 3 and away_wins == 3)
+        is_elim     = (home_wins == 3 or away_wins == 3) and not is_game7
+
+        return {
+            "game_number":   game_num,
+            "home_wins":     home_wins,
+            "away_wins":     away_wins,
+            "is_elimination": is_elim,
+            "is_game7":      is_game7,
+        }
+    except Exception as e:
+        print(f"[edge] Series context error: {e}")
+        return defaults
+
+
+def is_playoff_game(game_id: str) -> bool:
+    """Check if a game is a playoff game (gameType == 3 in NHL API)."""
+    try:
+        games_df = fetch("games")
+        if games_df.empty:
+            return False
+        row = games_df[games_df["id"] == game_id]
+        if row.empty:
+            return False
+        return str(row.iloc[0].get("game_type", "")) == "3"
+    except Exception:
+        return False
 
 
 # ── No-vig market probability ─────────────────────────────────────────────────
@@ -80,13 +149,13 @@ def best_book_price(game_id: str, market: str, outcome: str) -> tuple[int, str]:
 
 # ── Situational modifiers ─────────────────────────────────────────────────────
 
-def get_situational_modifier(game_id: str, outcome: str) -> float:
+def get_situational_modifier(game_id: str, outcome: str, market: str = "h2h") -> float:
     """
     Applies modifiers for:
     - Altitude (COL home)
-    - Back-to-back fatigue
-    - PP/PK differential based on lineup
     - Goalie quality differential
+    - Playoff: home ice, game 7, elimination game pressure
+    - Playoff: totals over boost (no-shootout OT)
     """
     modifier = 0.0
 
@@ -99,15 +168,23 @@ def get_situational_modifier(game_id: str, outcome: str) -> float:
             return modifier
         game = game.iloc[0]
 
-        home_abbr = game.get("home_abbr", "")
-        away_abbr = game.get("away_abbr", "")
+        home_abbr  = game.get("home_abbr", "")
+        away_abbr  = game.get("away_abbr", "")
+        game_type  = str(game.get("game_type", "2"))
+        is_playoff = game_type == "3"
 
-        # Altitude modifier
-        if home_abbr in ALTITUDE_TEAMS:
-            if outcome == away_abbr or "away" in outcome.lower():
-                modifier += ALTITUDE_MODIFIER
+        outcome_lower = outcome.lower()
+        is_home_outcome = (outcome == home_abbr or "home" in outcome_lower
+                           or outcome == game.get("home_team", ""))
+        is_away_outcome = not is_home_outcome
+        is_over_outcome = "over" in outcome_lower
+        is_total_market = market in ("totals", "team_totals")
 
-        # Goalie differential
+        # ── Regular season: altitude modifier ──────────────────────────────────
+        if home_abbr in ALTITUDE_TEAMS and is_away_outcome:
+            modifier += ALTITUDE_MODIFIER
+
+        # ── Goalie differential ────────────────────────────────────────────────
         goalies = fetch("goalies")
         if not goalies.empty:
             home_g = goalies[goalies["team_abbr"] == home_abbr]
@@ -116,8 +193,42 @@ def get_situational_modifier(game_id: str, outcome: str) -> float:
                 home_gsaa = float(home_g.iloc[0].get("gsaa_season") or 0)
                 away_gsaa = float(away_g.iloc[0].get("gsaa_season") or 0)
                 gsaa_diff = home_gsaa - away_gsaa
-                # Normalize: each 5 GSAA points = ~1.5% probability modifier
-                modifier += gsaa_diff * 0.003
+                # Each 5 GSAA points ≈ 1.5% probability modifier
+                goalie_mod = gsaa_diff * 0.003
+                if is_home_outcome:
+                    modifier += goalie_mod
+                elif is_away_outcome and not is_total_market:
+                    modifier -= goalie_mod
+
+        # ── Playoff-specific modifiers ─────────────────────────────────────────
+        if is_playoff:
+            series = get_series_context(home_abbr, away_abbr)
+
+            # Home ice advantage (amplified vs regular season)
+            if is_home_outcome:
+                modifier += PLAYOFF_HOME_ICE_MODIFIER
+            elif is_away_outcome and not is_total_market:
+                modifier -= PLAYOFF_HOME_ICE_MODIFIER
+
+            # Game 7 — extreme home advantage (~63% historical)
+            if series["is_game7"] and is_home_outcome:
+                modifier += PLAYOFF_GAME7_HOME_MODIFIER
+
+            # Elimination game — team facing elimination at home gets a boost;
+            # road team facing elimination (fighting off elimination away) gets penalty
+            if series["is_elimination"]:
+                home_facing_elim = series["home_wins"] == 3
+                away_facing_elim = series["away_wins"] == 3
+                if away_facing_elim and is_home_outcome:
+                    # Home team can close out — road team fatigue/pressure
+                    modifier += PLAYOFF_ELIM_ROAD_PENALTY
+                elif home_facing_elim and is_away_outcome and not is_total_market:
+                    modifier += PLAYOFF_ELIM_ROAD_PENALTY
+
+            # Totals: no shootout in playoffs → under has less "easy goal" bail-out
+            # Playoff games that go to OT produce goals; tight games no longer end 1-0 in SO
+            if is_total_market and is_over_outcome:
+                modifier += PLAYOFF_TOTALS_OVER_BOOST
 
     except Exception as e:
         print(f"[edge] Situational modifier error: {e}")
@@ -187,8 +298,14 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
 
     if game_id:
         games_df = games_df[games_df["id"] == game_id]
+    else:
+        # Only process today and future games — skip stale regular season rows
+        from datetime import date as _date
+        today_str = _date.today().isoformat()
+        if "game_date" in games_df.columns:
+            games_df = games_df[games_df["game_date"] >= today_str]
 
-    odds_df = fetch("odds")
+    odds_df = fetch("odds", limit=5000)
     if odds_df.empty:
         return edges
 
@@ -196,7 +313,9 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
         gid       = game["id"]
         game_odds = odds_df[odds_df["game_id"] == gid]
 
-        for market in game_odds["market"].unique():
+        # team_totals has 4 outcomes (Home/Away × Over/Under) — vig removal
+        # requires paired-market logic not yet implemented; skip for now.
+        for market in game_odds[game_odds["market"] != "team_totals"]["market"].unique():
             mkt_df   = game_odds[game_odds["market"] == market]
             outcomes = mkt_df["outcome"].unique().tolist()
 
@@ -208,9 +327,26 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
                 if market_prob is None:
                     continue
 
-                situational = get_situational_modifier(gid, outcome)
-                model_prob  = min(max(market_prob + situational, 0.01), 0.99)
-                edge        = model_prob - market_prob
+                playoff = is_playoff_game(gid)
+
+                # ── Model probability ──────────────────────────────────────
+                # Primary: Poisson/xG model from MoneyPuck data.
+                # Situational modifiers are additive (goalie GSAA, altitude,
+                # playoff home ice, game 7, elimination) — all non-redundant
+                # with the xG base since they capture factors the xG rate
+                # doesn't (goalie skill vs expected, crowd/pressure effects).
+                # Fallback: market no-vig + situational if team_stats empty.
+                xg_prob    = model_probability(gid, market, outcome, playoff)
+                situational = get_situational_modifier(gid, outcome, market)
+
+                if xg_prob is not None:
+                    model_prob = min(max(xg_prob + situational, 0.01), 0.99)
+                    source     = "xg_poisson"
+                else:
+                    model_prob = min(max(market_prob + situational, 0.01), 0.99)
+                    source     = "market_fallback"
+
+                edge = model_prob - market_prob
 
                 if abs(edge) < 0.01:
                     continue
@@ -244,6 +380,7 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
                     "kelly_quarter":     round(k_qtr, 4),
                     "rlm":               has_rlm,
                     "convergence":       convergence,
+                    "model_source":      source,
                     "created_at":        now,
                 })
 

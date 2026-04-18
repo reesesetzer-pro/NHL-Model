@@ -14,12 +14,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
     SYNC_ODDS_INTERVAL, SYNC_GOALIES_INTERVAL,
-    SYNC_INJURIES_INTERVAL, SYNC_LINEUPS_INTERVAL
+    SYNC_INJURIES_INTERVAL, SYNC_LINEUPS_INTERVAL,
+    SYNC_SERIES_INTERVAL, SYNC_MONEYPUCK_INTERVAL,
 )
-from sync.odds_sync     import run_game_odds_sync, run_props_sync
-from sync.goalies_sync  import run_goalie_sync
-from sync.injuries_sync import run_injuries_sync
-from sync.lineups_sync  import run_lineups_sync
+from sync.odds_sync        import run_game_odds_sync, run_props_sync
+from sync.goalies_sync     import run_goalie_sync
+from sync.injuries_sync    import run_injuries_sync
+from sync.lineups_sync     import run_lineups_sync
+from sync.series_sync      import run_series_sync
+from sync.moneypuck_sync   import run_moneypuck_sync
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +35,8 @@ log = logging.getLogger("scheduler")
 def run_all() -> None:
     """Cold-start — run every sync immediately."""
     log.info("🏒 Cold-start sync...")
+    run_moneypuck_sync()   # team xG data first — needed by edge engine
+    run_series_sync()      # backfills game_type before odds parse
     run_injuries_sync()
     run_goalie_sync()
     run_lineups_sync()
@@ -45,6 +50,22 @@ def main() -> None:
 
     scheduler = BlockingScheduler(timezone="America/New_York")
 
+    scheduler.add_job(
+        run_moneypuck_sync,
+        trigger=IntervalTrigger(seconds=SYNC_MONEYPUCK_INTERVAL),
+        id="moneypuck",
+        name="MoneyPuck xG Sync",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        run_series_sync,
+        trigger=IntervalTrigger(seconds=SYNC_SERIES_INTERVAL),
+        id="series",
+        name="Playoff Series Sync",
+        max_instances=1,
+        misfire_grace_time=120,
+    )
     scheduler.add_job(
         run_injuries_sync,
         trigger=IntervalTrigger(seconds=SYNC_INJURIES_INTERVAL),
@@ -87,6 +108,8 @@ def main() -> None:
     )
 
     log.info("📅 Scheduler started.")
+    log.info(f"   MoneyPuck: every {SYNC_MONEYPUCK_INTERVAL//3600}hr")
+    log.info(f"   Series:    every {SYNC_SERIES_INTERVAL//60}min")
     log.info(f"   Injuries:  every {SYNC_INJURIES_INTERVAL//60}min")
     log.info(f"   Goalies:   every {SYNC_GOALIES_INTERVAL//60}min")
     log.info(f"   Lineups:   every {SYNC_LINEUPS_INTERVAL//60}min")

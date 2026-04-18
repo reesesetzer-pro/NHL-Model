@@ -248,8 +248,23 @@ def fmt_pct(v):
         return "—"
 
 
+def team_badge(abbr: str, size: int = 32) -> str:
+    """Styled team-abbreviation badge — no external CDN, always renders."""
+    abbr = (abbr or "?")[:3].upper()
+    fs = max(7, size // 4)
+    br = max(4, size // 6)
+    return (
+        f'<div style="width:{size}px;height:{size}px;background:#1A1A2E;'
+        f'border:1px solid #2E2E50;border-radius:{br}px;display:inline-flex;'
+        f'align-items:center;justify-content:center;flex-shrink:0;'
+        f'font-family:Space Mono,monospace;font-size:{fs}px;'
+        f'font-weight:700;color:#00D4FF;letter-spacing:-0.5px;">'
+        f'{abbr}</div>'
+    )
+
+
 # ── Header ─────────────────────────────────────────────────────────────────────
-col_logo, col_title, col_time = st.columns([1, 8, 2])
+col_logo, col_title, col_time, col_logbet = st.columns([1, 7, 2, 2])
 with col_logo:
     st.markdown("""
     <div style='padding-top:6px;'>
@@ -273,6 +288,63 @@ with col_time:
         <div style='font-family:"Space Mono",monospace; font-size:11px; color:#444466;'>{now_et().strftime('%I:%M %p ET')}</div>
     </div>
     """, unsafe_allow_html=True)
+with col_logbet:
+    st.markdown("<div style='padding-top:14px;'>", unsafe_allow_html=True)
+    with st.popover("📝 Log Bet", use_container_width=True):
+        st.markdown("#### Log a Bet")
+
+        games_for_log = safe_fetch("games")
+        today_str     = date.today().isoformat()
+        if not games_for_log.empty and "game_date" in games_for_log.columns:
+            upcoming = games_for_log[games_for_log["game_date"] >= today_str].copy()
+        else:
+            upcoming = games_for_log
+
+        game_options_log = {"— no game —": None}
+        if not upcoming.empty:
+            for _, gr in upcoming.iterrows():
+                label = f"{gr.get('away_abbr','?')} @ {gr.get('home_abbr','?')}  {gr.get('game_date','')}"
+                game_options_log[label] = gr["id"]
+
+        selected_game_log = st.selectbox("Game", list(game_options_log.keys()), key="lb_game")
+        log_outcome = st.text_input("Pick (team / player prop)", placeholder="e.g. VGK ML · MacKinnon Over 2.5 SOG", key="lb_outcome")
+        lb1, lb2 = st.columns(2)
+        with lb1:
+            log_market = st.selectbox("Market", [
+                "h2h", "spreads", "totals", "team_totals",
+                "player_shots_on_goal", "player_points",
+                "player_goals", "player_assists", "goalie_saves",
+            ], key="lb_market")
+            log_price = st.number_input("Price (American)", value=-110, step=5, key="lb_price")
+        with lb2:
+            log_book = st.selectbox("Book", [
+                "draftkings", "fanduel", "betmgm",
+                "caesars", "bet365", "thescore_bet", "hardrockbet",
+            ], key="lb_book")
+            log_size = st.number_input("Bet Size ($)", value=50.0, min_value=1.0, step=5.0, key="lb_size")
+
+        log_edge = st.number_input("Edge at Bet (%)", value=0.0, min_value=0.0, step=0.5, key="lb_edge")
+        log_notes = st.text_input("Notes (optional)", placeholder="RLM signal, goalie, matchup...", key="lb_notes")
+
+        if st.button("✅ Submit Bet", use_container_width=True, key="lb_submit"):
+            try:
+                from utils.db import insert as _db_insert
+                _db_insert("bets", [{
+                    "game_id":      game_options_log.get(selected_game_log),
+                    "game_date":    today_str,
+                    "market":       log_market,
+                    "outcome":      log_outcome,
+                    "book":         log_book,
+                    "price":        int(log_price),
+                    "bet_size":     float(log_size),
+                    "edge_at_bet":  float(log_edge) / 100,
+                    "result":       "pending",
+                    "notes":        log_notes,
+                }])
+                st.success("Logged!")
+            except Exception as e:
+                st.error(str(e))
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ── Live status bar ───────────────────────────────────────────────────────────
@@ -316,6 +388,7 @@ tabs = st.tabs([
     "🥅 Goalie Board",
     "📊 Model Tracker",
     "📓 Bet Journal",
+    "🏆 Playoff Bracket",
 ])
 
 
@@ -399,32 +472,26 @@ with tabs[0]:
                 st.markdown(f"""
                 <div class="game-card" style="{border_style}">
                   <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
-                    <!-- Teams -->
                     <div style="flex:1; min-width:280px;">
                       <div style="font-size:11px; color:#444466; font-family:'Space Mono',monospace; margin-bottom:10px; letter-spacing:1px;">
                         ⏱ {game_time}
                       </div>
-                      <!-- Away -->
                       <div class="team-row">
-                        <img class="team-logo" src="https://a.espncdn.com/i/teamlogos/nhl/500/{away_abbr.lower()}.png"
-                             onerror="this.style.display='none'" />
+                        {team_badge(away_abbr, 44)}
                         <div>
                           <div class="team-name">{away}</div>
                           <div class="team-abbr">{away_abbr} · AWAY</div>
                         </div>
                       </div>
                       <div style="font-size:11px; color:#333355; text-align:center; margin:4px 0 4px 56px;">@</div>
-                      <!-- Home -->
                       <div class="team-row">
-                        <img class="team-logo" src="https://a.espncdn.com/i/teamlogos/nhl/500/{home_abbr.lower()}.png"
-                             onerror="this.style.display='none'" />
+                        {team_badge(home_abbr, 44)}
                         <div>
                           <div class="team-name">{home}</div>
                           <div class="team-abbr">{home_abbr} · HOME</div>
                         </div>
                       </div>
                     </div>
-                    <!-- Badges -->
                     <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-end;">
                       {"<span class='convergence-tag'>🔄✅ SHARP CONVERGENCE</span>" if convergence else ""}
                       {"<span class='rlm-" + (best_rlm_tier or 'soft') + "'>🔄 RLM · " + (best_rlm_tier or '').upper() + "</span>" if has_rlm and not convergence else ""}
@@ -504,8 +571,7 @@ with tabs[0]:
                                 sv_str = f".{int(float(svp)*1000):03d}" if svp else "—"
                                 st.markdown(f"""
                                 <div class="goalie-card">
-                                  <img src="https://a.espncdn.com/i/teamlogos/nhl/500/{team_abbr.lower()}.png"
-                                       width="32" style="object-fit:contain;" />
+                                  {team_badge(team_abbr, 32)}
                                   <div class="goalie-name">{goalie.get("player_name","Unknown")}</div>
                                   <div class="{sc}">{sl}</div>
                                   <div class="goalie-stat" style="margin-top:6px;">Last 5 SV%: {sv_str}</div>
@@ -618,14 +684,10 @@ with tabs[1]:
                 <div style="background:#0D0D18; border:1px solid #1E1E30; border-left:3px solid {border_col};
                             border-radius:10px; padding:16px 20px; margin-bottom:10px;">
                   <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
-
-                    <!-- Left: game + market -->
                     <div style="display:flex; align-items:center; gap:14px; flex:1; min-width:240px;">
                       <div style="display:flex; flex-direction:column; align-items:center; gap:3px;">
-                        <img src="https://a.espncdn.com/i/teamlogos/nhl/500/{away_abbr.lower()}.png"
-                             width="28" height="28" style="object-fit:contain;" onerror="this.style.display='none'" />
-                        <img src="https://a.espncdn.com/i/teamlogos/nhl/500/{home_abbr.lower()}.png"
-                             width="28" height="28" style="object-fit:contain;" onerror="this.style.display='none'" />
+                        {team_badge(away_abbr, 28)}
+                        {team_badge(home_abbr, 28)}
                       </div>
                       <div>
                         <div style="font-size:13px; font-weight:600; color:#E2E2EE; margin-bottom:2px;">{game_label}</div>
@@ -633,8 +695,6 @@ with tabs[1]:
                         <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">{tags_html}</div>
                       </div>
                     </div>
-
-                    <!-- Right: stats grid -->
                     <div style="display:flex; gap:20px; align-items:center; flex-wrap:wrap;">
                       <div style="text-align:center;">
                         <div style="font-size:10px; color:#444466; margin-bottom:2px;">EDGE</div>
@@ -702,8 +762,7 @@ with tabs[1]:
                             border-radius:8px; padding:12px 16px; margin-bottom:8px;
                             display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
                   <div style="display:flex; align-items:center; gap:12px;">
-                    <img src="https://a.espncdn.com/i/teamlogos/nhl/500/{abbr.lower()}.png"
-                         width="28" height="28" style="object-fit:contain;" onerror="this.style.display='none'" />
+                    {team_badge(abbr, 28)}
                     <div>
                       <div style="font-size:13px; font-weight:600; color:#E2E2EE;">{row.get("player_name","")}</div>
                       <div style="font-size:11px; color:#666688; font-family:'Space Mono',monospace;">
@@ -965,9 +1024,7 @@ with tabs[4]:
                             padding:12px 16px; margin-bottom:8px;
                             display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
                     <div style="display:flex; align-items:center; gap:12px;">
-                        <img src="https://a.espncdn.com/i/teamlogos/nhl/500/{str(row.get('team_abbr','')).lower()}.png"
-                             width="28" height="28" style="object-fit:contain;"
-                             onerror="this.style.display='none'" />
+                        {team_badge(str(row.get('team_abbr','')), 28)}
                         <div>
                             <div style="font-size:14px; font-weight:600; color:#E2E2EE;">{row.get('player_name','')}</div>
                             <div style="font-size:11px; color:#666688; font-family:'Space Mono',monospace;">
@@ -1027,9 +1084,7 @@ with tabs[5]:
             st.markdown(f"""
             <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:12px; padding:24px; margin-bottom:20px;">
                 <div style="display:flex; align-items:center; gap:16px; margin-bottom:20px;">
-                    <img src="https://a.espncdn.com/i/teamlogos/nhl/500/{team_abbr.lower()}.png"
-                         width="52" height="52" style="object-fit:contain;"
-                         onerror="this.style.display='none'" />
+                    {team_badge(team_abbr, 52)}
                     <div>
                         <div style="font-size:20px; font-weight:700; color:#E2E2EE;">{player_name}</div>
                         <div style="font-size:12px; color:#666688; font-family:'Space Mono',monospace;">{team_abbr} · {line_info}</div>
@@ -1118,9 +1173,7 @@ with tabs[6]:
                 st.markdown(f"""
                 <div style="background:#0D0D18; border:1px solid #1E1E30; border-left:3px solid {color};
                             border-radius:10px; padding:16px; margin-bottom:16px; text-align:center;">
-                    <img src="https://a.espncdn.com/i/teamlogos/nhl/500/{abbr.lower()}.png"
-                         width="40" height="40" style="object-fit:contain;"
-                         onerror="this.style.display='none'" />
+                    {team_badge(abbr, 40)}
                     <div style="font-size:14px; font-weight:600; color:#E2E2EE; margin:8px 0 4px;">{name}</div>
                     <div style="color:{color}; font-size:10px; font-weight:700; letter-spacing:0.5px; margin-bottom:10px;">{label}</div>
                     <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; text-align:left;">
@@ -1297,6 +1350,193 @@ with tabs[8]:
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 10 — PLAYOFF BRACKET
+# ─────────────────────────────────────────────────────────────────────────────
+with tabs[9]:
+    st.markdown("""
+    <div style="margin-bottom:20px;">
+        <div style="font-size:18px; font-weight:700; margin-bottom:4px;">🏆 Playoff Bracket</div>
+        <div style="font-size:12px; color:#444466; font-family:'Space Mono',monospace;">
+            Series records · Game context · Rest days · Model modifiers active
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    series_df = safe_fetch("playoff_series")
+
+    if series_df.empty:
+        st.markdown("""
+        <div style="text-align:center; padding:60px 0; color:#444466;">
+            <div style="font-size:32px; margin-bottom:12px;">🏒</div>
+            <div style="font-size:15px; font-weight:600;">No playoff bracket data yet</div>
+            <div style="font-size:12px; margin-top:6px; font-family:'Space Mono',monospace;">
+                Playoffs haven't started · Run series sync when bracket is set
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Manual sync button
+        if st.button("🔄 Sync Bracket Now", use_container_width=False):
+            with st.spinner("Syncing playoff bracket..."):
+                try:
+                    import sys
+                    sys.path.insert(0, "C:/NHL_Model")
+                    from sync.series_sync import run_series_sync
+                    run_series_sync()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Series sync error: {e}")
+
+        round_order = series_df["round_number"].sort_values().unique().tolist()
+
+        for rnd_num in round_order:
+            rnd_series = series_df[series_df["round_number"] == rnd_num].copy()
+            if rnd_series.empty:
+                continue
+
+            round_name = rnd_series.iloc[0].get("round_name", f"Round {rnd_num}")
+            active_count = len(rnd_series[~rnd_series["is_complete"].fillna(False)])
+
+            st.markdown(f"""
+            <div style="font-size:13px; font-weight:700; color:#00D4FF; letter-spacing:1px;
+                        text-transform:uppercase; margin:24px 0 12px;
+                        border-bottom:1px solid #1E1E30; padding-bottom:8px;">
+                {round_name}
+                <span style="font-size:10px; color:#444466; font-weight:400; margin-left:8px;">
+                    {active_count} active
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            cols = st.columns(2)
+            for i, (_, row) in enumerate(rnd_series.iterrows()):
+                with cols[i % 2]:
+                    t1      = row.get("team1_abbr", "")
+                    t2      = row.get("team2_abbr", "")
+                    t1name  = row.get("team1_name", t1)
+                    t2name  = row.get("team2_name", t2)
+                    t1w     = int(row.get("team1_wins", 0))
+                    t2w     = int(row.get("team2_wins", 0))
+                    game_num = int(row.get("game_number", 1))
+                    complete = bool(row.get("is_complete", False))
+                    winner  = row.get("winner_abbr", "")
+                    t1_rest = row.get("team1_rest_days")
+                    t2_rest = row.get("team2_rest_days")
+
+                    # Determine leader
+                    if t1w > t2w:
+                        leader, trailer = t1, t2
+                        lead_w, trail_w = t1w, t2w
+                    elif t2w > t1w:
+                        leader, trailer = t2, t1
+                        lead_w, trail_w = t2w, t1w
+                    else:
+                        leader = trailer = ""
+                        lead_w = trail_w = t1w
+
+                    is_game7    = (t1w == 3 and t2w == 3)
+                    is_elim     = not is_game7 and (t1w == 3 or t2w == 3) and not complete
+
+                    # Border color
+                    if complete:
+                        border = "#333355"
+                    elif is_game7:
+                        border = "#FF2D2D"
+                    elif is_elim:
+                        border = "#FF6B35"
+                    else:
+                        border = "#1E1E30"
+
+                    # Game badge
+                    if complete:
+                        game_badge = f"<span style='background:#1A1A2E;border:1px solid #2E2E50;color:#444466;border-radius:4px;padding:3px 8px;font-size:10px;font-family:Space Mono,monospace;'>FINAL</span>"
+                    elif is_game7:
+                        game_badge = f"<span style='background:#FF2D2D20;border:1px solid #FF2D2D40;color:#FF2D2D;border-radius:4px;padding:3px 8px;font-size:10px;font-weight:700;font-family:Space Mono,monospace;'>GAME 7</span>"
+                    elif is_elim:
+                        elim_team = t1name if t1w == 3 else t2name
+                        elim_abbr = t1 if t1w == 3 else t2
+                        game_badge = f"<span style='background:#FF6B3520;border:1px solid #FF6B3540;color:#FF6B35;border-radius:4px;padding:3px 8px;font-size:10px;font-weight:700;font-family:Space Mono,monospace;'>GAME {game_num} · ELIM</span>"
+                    else:
+                        game_badge = f"<span style='background:#1A1A2E;border:1px solid #2E2E50;color:#B8B8D4;border-radius:4px;padding:3px 8px;font-size:10px;font-family:Space Mono,monospace;'>GAME {game_num}</span>"
+
+                    # Rest day display
+                    def rest_html(days, abbr):
+                        if days is None:
+                            return ""
+                        color = "#00FF88" if days >= 2 else ("#FFD700" if days == 1 else "#FF6B35")
+                        label = f"{days}d rest" if days > 0 else "B2B"
+                        return f"<span style='font-size:10px;color:{color};font-family:Space Mono,monospace;'>{abbr}: {label}</span>"
+
+                    rest_row = " &nbsp;·&nbsp; ".join(filter(None, [rest_html(t1_rest, t1), rest_html(t2_rest, t2)]))
+
+                    # Playoff model modifier note
+                    mod_notes = []
+                    if not complete:
+                        if is_game7:
+                            mod_notes.append("Game 7 home +4%")
+                        if is_elim:
+                            mod_notes.append("Elim road −2%")
+                        mod_notes.append("Home ice +2.5%")
+                        mod_notes.append("Totals over +1.5%")
+                    mod_html = ""
+                    if mod_notes:
+                        mod_html = f"""
+                        <div style="margin-top:10px; padding-top:8px; border-top:1px solid #0F0F1E;">
+                            <div style="font-size:9px; color:#444466; letter-spacing:0.8px; margin-bottom:4px;">ACTIVE MODIFIERS</div>
+                            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                {"".join(f'<span style="background:#00D4FF10;border:1px solid #00D4FF20;color:#00D4FF;border-radius:3px;padding:2px 6px;font-size:9px;font-family:Space Mono,monospace;">{m}</span>' for m in mod_notes)}
+                            </div>
+                        </div>
+                        """
+
+                    winner_note = ""
+                    if complete and winner:
+                        winner_name = t1name if winner == t1 else t2name
+                        winner_note = f"<div style='margin-top:8px;font-size:11px;color:#00FF88;font-weight:700;'>✅ {winner_name} advance</div>"
+
+                    st.markdown(f"""
+                    <div style="background:#0D0D18; border:1px solid {border}; border-left:3px solid {border};
+                                border-radius:10px; padding:16px; margin-bottom:12px;
+                                {'opacity:0.5;' if complete else ''}">
+
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
+                            {game_badge}
+                            <span style="font-size:10px; color:#444466; font-family:Space Mono,monospace;">{rest_row}</span>
+                        </div>
+
+                        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                {team_badge(t1, 32)}
+                                <div>
+                                    <div style="font-size:13px; font-weight:600;
+                                                color:{'#E2E2EE' if not complete or winner == t1 else '#666688'};">{t1name}</div>
+                                    <div style="font-size:10px; color:#444466;">{t1}</div>
+                                </div>
+                            </div>
+                            <div style="font-family:'Space Mono',monospace; font-size:22px; font-weight:700;
+                                        color:{'#00FF88' if t1w > t2w else ('#FF4444' if t1w < t2w else '#B8B8D4')};">{t1w}</div>
+                        </div>
+
+                        <div style="display:flex; align-items:center; justify-content:space-between;">
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                {team_badge(t2, 32)}
+                                <div>
+                                    <div style="font-size:13px; font-weight:600;
+                                                color:{'#E2E2EE' if not complete or winner == t2 else '#666688'};">{t2name}</div>
+                                    <div style="font-size:10px; color:#444466;">{t2}</div>
+                                </div>
+                            </div>
+                            <div style="font-family:'Space Mono',monospace; font-size:22px; font-weight:700;
+                                        color:{'#00FF88' if t2w > t1w else ('#FF4444' if t2w < t1w else '#B8B8D4')};">{t2w}</div>
+                        </div>
+
+                        {winner_note}
+                        {mod_html}
+                    </div>
+                    """, unsafe_allow_html=True)
 
 
 # ── Footer ────────────────────────────────────────────────────────────────────

@@ -54,7 +54,12 @@ def scrape_daily_faceoff() -> list[dict]:
                 conf_text = (conf_el.get_text(strip=True) if conf_el else "").lower()
 
                 abbr = name_to_abbr(team_text)
-                status = "projected_high" if "confirm" in conf_text else "projected_high"
+                if "confirmed" in conf_text or "confirm" in conf_text:
+                    status = "confirmed"
+                elif "likely" in conf_text or "probable" in conf_text or "expected" in conf_text:
+                    status = "projected_high"
+                else:
+                    status = "projected_model"
 
                 projections.append({
                     "team_abbr":   abbr,

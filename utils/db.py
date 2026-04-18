@@ -211,4 +211,50 @@ create table if not exists public_money (
     money_pct numeric,
     updated_at timestamptz default now()
 );
+
+-- Playoff series bracket
+create table if not exists playoff_series (
+    id text primary key,
+    season text,
+    round_number integer,
+    round_name text,
+    series_letter text,
+    team1_abbr text,
+    team1_name text,
+    team1_wins integer default 0,
+    team2_abbr text,
+    team2_name text,
+    team2_wins integer default 0,
+    game_number integer default 1,
+    is_complete boolean default false,
+    winner_abbr text,
+    team1_rest_days integer,
+    team2_rest_days integer,
+    series_status text,
+    updated_at timestamptz default now()
+);
+
+-- Ensure games table has game_type for playoff detection
+alter table games add column if not exists game_type text default '2';
+
+-- Team stats (MoneyPuck xG/Corsi, updated daily)
+create table if not exists team_stats (
+    id text primary key,
+    team_abbr text,
+    season integer,
+    season_type text,           -- 'regular' | 'playoffs'
+    situation text,             -- 'all' | '5on5'
+    games_played integer,
+    xgf_per60 numeric,          -- expected goals for per 60 min
+    xga_per60 numeric,          -- expected goals against per 60 min
+    xg_pct numeric,             -- xG% (xGF / (xGF + xGA))
+    corsi_pct numeric,
+    fenwick_pct numeric,
+    gf_per60 numeric,           -- actual goals for per 60 min
+    ga_per60 numeric,           -- actual goals against per 60 min
+    updated_at timestamptz default now()
+);
+
+-- Add model_source to edges table (xg_poisson vs market_fallback)
+alter table edges add column if not exists model_source text default 'market_fallback';
 """
