@@ -321,40 +321,47 @@ def calculate_all_prop_edges() -> list[dict]:
         if mkt_df.empty:
             continue
 
-        # Group Over outcomes — each Over has a mirror Under
-        over_outcomes = [o for o in mkt_df["outcome"].unique() if " Over" in o]
+        # Group Over outcomes by (player, point) — prevents mixing 0.5 and 1.5 lines
+        # which would cause averaged under prices near zero and inflated no-vig probs.
+        all_over = mkt_df[mkt_df["outcome"].str.contains(" Over", na=False)].copy()
+        if all_over.empty:
+            continue
+        all_over["_player"] = (
+            all_over["outcome"].str.replace(" Over", "", regex=False).str.strip()
+        )
+        all_over["point"] = _pd.to_numeric(all_over["point"], errors="coerce")
 
-        for over_outcome in over_outcomes:
-            player_name  = over_outcome.replace(" Over", "").strip()
-            under_outcome = over_outcome.replace(" Over", " Under")
+        for (player_name, point_val), grp_over in all_over.groupby(["_player", "point"]):
+            under_name = f"{player_name} Under"
+            grp_under  = mkt_df[
+                (mkt_df["outcome"] == under_name) &
+                (_pd.to_numeric(mkt_df["point"], errors="coerce") == point_val)
+            ]
 
-            over_rows  = mkt_df[mkt_df["outcome"] == over_outcome]
-            under_rows = mkt_df[mkt_df["outcome"] == under_outcome]
-
-            if over_rows.empty or under_rows.empty:
+            if grp_over.empty or grp_under.empty:
                 continue
 
-            # Best price for over, consensus for under
-            best_idx   = over_rows["price"].idxmax()
-            best_price = int(over_rows.loc[best_idx, "price"])
-            best_book  = str(over_rows.loc[best_idx, "book"])
-            game_id    = str(over_rows.iloc[0]["game_id"])
-
-            pts = over_rows["point"].dropna()
-            if pts.empty:
+            # Consensus no-vig: average implied probs across books (NOT American odds).
+            # Averaging American odds is invalid — median([+100, -105]) = -2.5 which
+            # american_to_implied maps to ~2%, collapsing the vig removal to ~97%.
+            # Implied probability space is linear; American odds space is not.
+            over_imps  = [american_to_implied(int(p)) for p in grp_over["price"]  if p != 0]
+            under_imps = [american_to_implied(int(p)) for p in grp_under["price"] if p != 0]
+            if not over_imps or not under_imps:
                 continue
-            point = float(pts.median())
-
-            opp_price  = float(under_rows["price"].mean())
-
-            # No-vig probability
-            our_imp = american_to_implied(best_price)
-            opp_imp = american_to_implied(int(opp_price))
+            our_imp = float(np.mean(over_imps))
+            opp_imp = float(np.mean(under_imps))
             if our_imp <= 0 or opp_imp <= 0:
                 continue
             no_vig_over, _ = remove_vig(our_imp, opp_imp)
             if no_vig_over is None or no_vig_over <= 0:
                 continue
+
+            # Best available price for the bettor at this specific line
+            best_idx   = grp_over["price"].idxmax()
+            best_price = int(grp_over.loc[best_idx, "price"])
+            best_book  = str(grp_over.loc[best_idx, "book"])
+            game_id    = str(grp_over.iloc[0]["game_id"])
 
             # Skip injured players
             if player_name.lower() in injured_names:
@@ -378,15 +385,16 @@ def calculate_all_prop_edges() -> list[dict]:
             model_prob = min(max(model_prob, 0.01), 0.99)
             edge = model_prob - no_vig_over
 
-            prop_id = _make_id(game_id, market, player_name, "Over", today_str)
+            # Include point_val in ID to prevent collision between 0.5 and 1.5 rows
+            prop_id = _make_id(game_id, market, player_name, "Over", str(point_val), today_str)
             results.append({
                 "id":                 prop_id,
                 "game_id":            game_id,
                 "player_name":        player_name,
                 "team_abbr":          team_abbr,
                 "market":             market,
-                "outcome":            over_outcome,
-                "point":              point,
+                "outcome":            f"{player_name} Over",
+                "point":              float(point_val),
                 "book":               best_book,
                 "price":              best_price,
                 "model_prob":         round(model_prob, 4),
