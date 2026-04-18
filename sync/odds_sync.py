@@ -136,10 +136,16 @@ def parse_and_store(events_with_odds: list[dict], is_props: bool = False) -> Non
                 continue
             for market in bookmaker.get("markets", []):
                 market_key = market.get("key", "")
+                is_prop    = market_key.startswith("player_") or market_key == "goalie_saves"
                 for outcome in market.get("outcomes", []):
-                    name   = outcome.get("name", "")
+                    name        = outcome.get("name", "")
+                    description = outcome.get("description", "")
                     price  = outcome.get("price", 0)
                     point  = outcome.get("point", None)
+                    # Props: name="Over"/"Under", description="Player Name"
+                    # → store as "Player Name Over" so edge engine can parse
+                    if is_prop and description:
+                        name = f"{description} {name}"
                     row_id = _make_id(game_id, book_key, market_key, name, point or "")
 
                     row = {

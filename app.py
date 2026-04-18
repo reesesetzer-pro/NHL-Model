@@ -1009,7 +1009,7 @@ with tabs[4]:
             mkt_opts = ["All"] + sorted(props_df["market"].unique().tolist())
             prop_mkt = st.selectbox("Market", mkt_opts)
         with fc2:
-            min_edge = st.slider("Min Edge %", 0, 20, 4)
+            min_edge = st.slider("Min Edge %", 0, 20, 0)
         with fc3:
             team_opts = ["All"] + sorted(props_df["team_abbr"].dropna().unique().tolist())
             team_filter = st.selectbox("Team", team_opts)

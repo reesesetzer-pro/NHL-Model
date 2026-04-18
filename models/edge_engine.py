@@ -281,16 +281,7 @@ def calculate_all_prop_edges() -> list[dict]:
     if games_df.empty:
         return results
 
-    odds_df = fetch("odds", limit=15000)
-    if odds_df.empty:
-        return results
-
-    prop_odds = odds_df[odds_df["market"].isin(PROP_MARKETS)]
-    if prop_odds.empty:
-        print("[edge] No prop odds in DB — run props sync first.")
-        return results
-
-    lineup_df  = fetch("lineups")
+    lineup_df   = fetch("lineups")
     injuries_df = fetch("injuries")
 
     # Index injuries for fast lookup
@@ -307,13 +298,26 @@ def calculate_all_prop_edges() -> list[dict]:
             if key:
                 lineup_index[key] = lr
 
+    # Fetch prop odds per game (avoids global row-limit issue on large odds tables)
+    import pandas as _pd
+    all_prop_rows = []
+    for _, game in games_df.iterrows():
+        gid = game["id"]
+        game_odds = fetch("odds", filters={"game_id": gid}, limit=2000)
+        if not game_odds.empty:
+            prop_rows = game_odds[game_odds["market"].isin(PROP_MARKETS)]
+            if not prop_rows.empty:
+                all_prop_rows.append(prop_rows)
+
+    if not all_prop_rows:
+        print("[edge] No prop odds in DB — run props sync first.")
+        return results
+
+    prop_odds  = _pd.concat(all_prop_rows, ignore_index=True)
     today_gids = set(games_df["id"].tolist())
 
     for market in PROP_MARKETS:
-        mkt_df = prop_odds[
-            (prop_odds["market"] == market) &
-            (prop_odds["game_id"].isin(today_gids))
-        ]
+        mkt_df = prop_odds[prop_odds["market"] == market]
         if mkt_df.empty:
             continue
 
@@ -401,6 +405,7 @@ def calculate_all_prop_edges() -> list[dict]:
     saves  = [r for r in results if r["market"] == "goalie_saves"]
     print(f"[edge] Props: {len(results)} total | "
           f"{len(scored)} scoring | {len(shots)} shots | {len(saves)} saves")
+    return results
 
 
 # ── Full game edge calculation ────────────────────────────────────────────────
