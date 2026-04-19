@@ -522,7 +522,7 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
 
     strong = sum(1 for e in edges if e["edge"] >= EDGE_STRONG_THRESHOLD)
     soft   = sum(1 for e in edges if EDGE_SOFT_THRESHOLD <= e["edge"] < EDGE_STRONG_THRESHOLD)
-    print(f"[edge] {len(edges)} edges calculated | 🟢 {strong} strong | 🟡 {soft} soft")
+    print(f"[edge] {len(edges)} edges calculated | STRONG:{strong} | SOFT:{soft}")
 
     return edges
 

@@ -1033,10 +1033,10 @@ with tabs[4]:
 
         # ── Probability tier helper ───────────────────────────────────────────
         def prob_tier(p):
-            if p >= 0.72:   return "LOCK",   "#00FF88", "#00FF8815", "#00FF8840"
-            if p >= 0.62:   return "STRONG", "#4CAF50", "#4CAF5015", "#4CAF5040"
-            if p >= 0.55:   return "LEAN",   "#FFD700", "#FFD70015", "#FFD70040"
-            return               "FAIR",   "#666688", "#66668815", "#66668840"
+            if p >= 0.72:   return "LOCK",   "#00FF88", "rgba(0,255,136,0.08)",   "rgba(0,255,136,0.28)"
+            if p >= 0.62:   return "STRONG", "#4CAF50", "rgba(76,175,80,0.08)",   "rgba(76,175,80,0.28)"
+            if p >= 0.55:   return "LEAN",   "#FFD700", "rgba(255,215,0,0.08)",   "rgba(255,215,0,0.28)"
+            return               "FAIR",   "#888899", "rgba(100,100,136,0.06)",  "rgba(100,100,136,0.20)"
 
         def fair_odds(prob):
             if prob <= 0 or prob >= 1:
@@ -1192,8 +1192,9 @@ with tabs[4]:
                     if has_value:
                         value_badge = f"<span style='background:#00D4FF15;border:1px solid #00D4FF40;color:#00D4FF;border-radius:3px;padding:2px 6px;font-size:9px;font-weight:700;font-family:Space Mono,monospace;'>LINE VALUE</span>"
 
-                    # Parlay add button
-                    btn_key = f"parlay_{player}_{market}_{point}"
+                    # Parlay add button — sanitize key (no spaces)
+                    safe_player = "".join(c if c.isalnum() else "_" for c in player)
+                    btn_key = f"par_{safe_player}_{market}_{point}"
                     already_in = any(
                         l["player"] == player and l["market"] == market
                         for l in st.session_state.parlay_legs
@@ -1241,7 +1242,7 @@ with tabs[4]:
                     with col_btn:
                         st.markdown("<div style='padding-top:8px;'>", unsafe_allow_html=True)
                         if not already_in:
-                            if st.button("＋", key=btn_key, help=f"Add {player} to parlay"):
+                            if st.button("+", key=btn_key, help=f"Add {player} to parlay"):
                                 st.session_state.parlay_legs.append({
                                     "player": player,
                                     "market": market,
