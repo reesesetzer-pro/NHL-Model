@@ -1056,12 +1056,12 @@ with tabs[4]:
         left_col, right_col = st.columns([3, 1])
 
         with right_col:
-            st.markdown("""
+            st.html("""
             <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:10px; padding:16px;">
                 <div style="font-size:12px; font-weight:700; color:#00D4FF; letter-spacing:1px; margin-bottom:12px;">
                     PARLAY BUILDER
                 </div>
-            """, unsafe_allow_html=True)
+            """)
 
             if "parlay_legs" not in st.session_state:
                 st.session_state.parlay_legs = []
@@ -1071,15 +1071,15 @@ with tabs[4]:
                 for leg in st.session_state.parlay_legs:
                     combined_prob *= leg["prob"]
                     mkt_s = leg["market"].replace("player_","").replace("_"," ").title()
-                    st.markdown(f"""
+                    st.html(f"""
                     <div style="border-bottom:1px solid #1A1A2A; padding:6px 0; font-size:11px;">
                         <div style="color:#E2E2EE; font-weight:600;">{leg['player']}</div>
                         <div style="color:#666688; font-family:'Space Mono',monospace;">{mkt_s} {leg['point']} · {leg['prob']*100:.0f}%</div>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """)
 
                 parlay_fair = fair_odds(combined_prob)
-                st.markdown(f"""
+                st.html(f"""
                 <div style="margin-top:12px; padding-top:10px; border-top:1px solid #2E2E50;">
                     <div style="font-size:10px; color:#444466; margin-bottom:4px;">COMBINED PROB</div>
                     <div style="font-family:'Space Mono',monospace; font-size:20px; font-weight:700;
@@ -1088,19 +1088,19 @@ with tabs[4]:
                     <div style="font-family:'Space Mono',monospace; font-size:16px; color:#FFD700;">{parlay_fair}</div>
                     <div style="font-size:9px; color:#444466; margin-top:4px;">{len(st.session_state.parlay_legs)}-leg parlay</div>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
 
                 if st.button("Clear Parlay", use_container_width=True):
                     st.session_state.parlay_legs = []
                     st.rerun()
             else:
-                st.markdown("""
+                st.html("""
                 <div style="text-align:center; padding:20px 0; color:#444466; font-size:12px;">
                     Click + on any prop<br>to build a parlay
                 </div>
-                """, unsafe_allow_html=True)
+                """)
 
-            st.markdown("</div>", unsafe_allow_html=True)
+            st.html("</div>")
 
         with left_col:
             # Filters
@@ -1146,19 +1146,19 @@ with tabs[4]:
             strongs = len(filtered[(filtered["market_prob_novig"] >= 0.62) & (filtered["market_prob_novig"] < 0.72)])
             leans   = len(filtered[(filtered["market_prob_novig"] >= 0.55) & (filtered["market_prob_novig"] < 0.62)])
 
-            st.markdown(f"""
+            st.html(f"""
             <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
-                <span style="background:#00FF8815;border:1px solid #00FF8840;color:#00FF88;
+                <span style="background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.25);color:#00FF88;
                              border-radius:4px;padding:4px 12px;font-size:11px;font-weight:700;
                              font-family:'Space Mono',monospace;">
                     LOCK: {locks}
                 </span>
-                <span style="background:#4CAF5015;border:1px solid #4CAF5040;color:#4CAF50;
+                <span style="background:rgba(76,175,80,0.08);border:1px solid rgba(76,175,80,0.25);color:#4CAF50;
                              border-radius:4px;padding:4px 12px;font-size:11px;font-weight:700;
                              font-family:'Space Mono',monospace;">
                     STRONG: {strongs}
                 </span>
-                <span style="background:#FFD70015;border:1px solid #FFD70040;color:#FFD700;
+                <span style="background:rgba(255,215,0,0.08);border:1px solid rgba(255,215,0,0.25);color:#FFD700;
                              border-radius:4px;padding:4px 12px;font-size:11px;font-weight:700;
                              font-family:'Space Mono',monospace;">
                     LEAN: {leans}
@@ -1167,7 +1167,7 @@ with tabs[4]:
                     {len(filtered)} total props
                 </span>
             </div>
-            """, unsafe_allow_html=True)
+            """)
 
             if filtered.empty:
                 st.info("No props matching filters.")
@@ -1190,7 +1190,7 @@ with tabs[4]:
 
                     value_badge = ""
                     if has_value:
-                        value_badge = f"<span style='background:#00D4FF15;border:1px solid #00D4FF40;color:#00D4FF;border-radius:3px;padding:2px 6px;font-size:9px;font-weight:700;font-family:Space Mono,monospace;'>LINE VALUE</span>"
+                        value_badge = f"<span style='background:rgba(0,212,255,0.08);border:1px solid rgba(0,212,255,0.25);color:#00D4FF;border-radius:3px;padding:2px 6px;font-size:9px;font-weight:700;font-family:Space Mono,monospace;'>LINE VALUE</span>"
 
                     # Parlay add button — sanitize key (no spaces)
                     safe_player = "".join(c if c.isalnum() else "_" for c in player)
@@ -1202,7 +1202,7 @@ with tabs[4]:
 
                     col_card, col_btn = st.columns([11, 1])
                     with col_card:
-                        st.markdown(f"""
+                        st.html(f"""
                         <div style="background:#0D0D18; border:1px solid {border};
                                     border-left:3px solid {color};
                                     border-radius:8px; padding:12px 16px; margin-bottom:6px;
@@ -1238,9 +1238,9 @@ with tabs[4]:
                                 </div>
                             </div>
                         </div>
-                        """, unsafe_allow_html=True)
+                        """)
                     with col_btn:
-                        st.markdown("<div style='padding-top:8px;'>", unsafe_allow_html=True)
+                        st.html("<div style='padding-top:8px;'>")
                         if not already_in:
                             if st.button("+", key=btn_key, help=f"Add {player} to parlay"):
                                 st.session_state.parlay_legs.append({
@@ -1253,8 +1253,8 @@ with tabs[4]:
                                 })
                                 st.rerun()
                         else:
-                            st.markdown("<div style='font-size:16px;color:#00FF88;text-align:center;'>✓</div>", unsafe_allow_html=True)
-                        st.markdown("</div>", unsafe_allow_html=True)
+                            st.html("<div style='font-size:16px;color:#00FF88;text-align:center;'>&#10003;</div>")
+                        st.html("</div>")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
