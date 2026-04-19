@@ -997,26 +997,48 @@ with tabs[4]:
                 except Exception as e:
                     st.error(f"Prop edge error: {e}")
 
-    props_df = safe_fetch("props", limit=2000)
-    inj_df   = safe_fetch("injuries")
+    props_df  = safe_fetch("props", limit=2000)
+    inj_df    = safe_fetch("injuries")
+    games_pf  = safe_fetch("games")
 
     if props_df.empty:
         st.info("No props data yet — click Sync Props Now then Calculate Edges.")
     else:
+        # ── Join game context ─────────────────────────────────────────────────
+        if not games_pf.empty:
+            game_map = {
+                row["id"]: f"{row.get('away_abbr','?')} @ {row.get('home_abbr','?')}"
+                for _, row in games_pf.iterrows()
+            }
+            game_date_map = {row["id"]: row.get("game_date","") for _, row in games_pf.iterrows()}
+            props_df["game_label"] = props_df["game_id"].map(game_map).fillna("")
+            props_df["game_date"]  = props_df["game_id"].map(game_date_map).fillna("")
+            # Keep only props for today/tomorrow games
+            today_str_pf = date.today().isoformat()
+            props_df = props_df[props_df["game_date"] >= today_str_pf]
+
         # ── Remove injured players ────────────────────────────────────────────
         if not inj_df.empty:
             injured_names = set(inj_df[inj_df["status"].isin(["out","doubtful"])]["player_name"].tolist())
             props_df = props_df[~props_df["player_name"].isin(injured_names)]
 
+        # ── Deduplicate: one row per (player, market, point) — best prob ──────
+        if not props_df.empty:
+            props_df = (
+                props_df
+                .sort_values("market_prob_novig", ascending=False)
+                .drop_duplicates(subset=["player_name", "market", "point"], keep="first")
+                .reset_index(drop=True)
+            )
+
         # ── Probability tier helper ───────────────────────────────────────────
         def prob_tier(p):
-            if p >= 0.72:   return "LOCK",   "#00FF88", "#00FF8820", "#00FF8840"
-            if p >= 0.62:   return "STRONG", "#4CAF50", "#4CAF5020", "#4CAF5040"
-            if p >= 0.55:   return "LEAN",   "#FFD700", "#FFD70020", "#FFD70040"
-            return          "FAIR",   "#666688", "#66668820", "#66668840"
+            if p >= 0.72:   return "LOCK",   "#00FF88", "#00FF8815", "#00FF8840"
+            if p >= 0.62:   return "STRONG", "#4CAF50", "#4CAF5015", "#4CAF5040"
+            if p >= 0.55:   return "LEAN",   "#FFD700", "#FFD70015", "#FFD70040"
+            return               "FAIR",   "#666688", "#66668815", "#66668840"
 
         def fair_odds(prob):
-            """No-vig implied prob → American odds string."""
             if prob <= 0 or prob >= 1:
                 return "—"
             if prob >= 0.5:
@@ -1024,10 +1046,11 @@ with tabs[4]:
             return f"+{int((1-prob)/prob*100)}"
 
         def line_value(price, prob):
-            """Returns True if the market price beats fair value."""
-            from utils.helpers import american_to_implied
-            book_imp = american_to_implied(int(price))
-            return book_imp < prob  # book charging less juice than fair = value
+            try:
+                from utils.helpers import american_to_implied as _a2i
+                return _a2i(int(price)) < prob
+            except Exception:
+                return False
 
         # ── Layout: filters left, parlay builder right ────────────────────────
         left_col, right_col = st.columns([3, 1])
@@ -1149,7 +1172,7 @@ with tabs[4]:
             if filtered.empty:
                 st.info("No props matching filters.")
             else:
-                for _, row in filtered.head(60).iterrows():
+                for _, row in filtered.head(80).iterrows():
                     prob       = float(row.get("market_prob_novig", 0))
                     price      = int(row.get("price", 0))
                     player     = str(row.get("player_name", ""))
@@ -1159,6 +1182,7 @@ with tabs[4]:
                     book       = str(row.get("book","")).replace("_bet","").replace("hardrockbet","hardrock")
                     mkt_clean  = market.replace("player_","").replace("_"," ").title()
                     outcome    = str(row.get("outcome",""))
+                    game_lbl   = str(row.get("game_label",""))
 
                     label, color, bg, border = prob_tier(prob)
                     fair       = fair_odds(prob)
@@ -1187,7 +1211,7 @@ with tabs[4]:
                                 <div>
                                     <div style="font-size:13px; font-weight:600; color:#E2E2EE;">{player}</div>
                                     <div style="font-size:10px; color:#666688; font-family:'Space Mono',monospace;">
-                                        {mkt_clean} Over {point}
+                                        {mkt_clean} Over {point} · <span style="color:#444466;">{game_lbl}</span>
                                     </div>
                                     <div style="margin-top:4px; display:flex; gap:4px; flex-wrap:wrap;">
                                         <span style="background:{bg};border:1px solid {border};color:{color};
@@ -1451,86 +1475,201 @@ with tabs[7]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 9 — BET JOURNAL
+# TAB 9 — BET JOURNAL + GRADE PICKS
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[8]:
     st.markdown("""
-    <div style="font-size:18px; font-weight:700; margin-bottom:16px;">📓 Bet Journal</div>
+    <div style="font-size:18px; font-weight:700; margin-bottom:4px;">📓 Bet Journal</div>
+    <div style="font-size:12px; color:#444466; font-family:'Space Mono',monospace; margin-bottom:20px;">
+        Log bets · Grade results · Track CLV
+    </div>
     """, unsafe_allow_html=True)
 
-    jc1, jc2 = st.columns([3, 2])
-    with jc1:
-        st.markdown("**Log a Bet**")
-        with st.container():
-            b1, b2 = st.columns(2)
-            with b1:
-                bet_outcome = st.text_input("Outcome / Player", placeholder="e.g. VGK ML or MacKinnon Over 2.5 SOG")
-                bet_market  = st.selectbox("Market", ["h2h","spreads","totals","team_totals","player_shots_on_goal","player_points","player_goals","player_assists","goalie_saves"])
-                bet_book    = st.selectbox("Book", ["draftkings","fanduel","betmgm","caesars","bet365","thescore_bet","hardrockbet"])
-            with b2:
-                bet_price   = st.number_input("Price (American)", value=-110, step=5)
-                bet_size    = st.number_input("Bet Size ($)", value=50.0, min_value=1.0, step=5.0)
-                bet_edge    = st.number_input("Edge at Bet (%)", value=5.0, min_value=0.0, step=0.5)
+    bets_df = safe_fetch("bets")
 
-            bet_notes = st.text_area("Notes", placeholder="Optional — matchup notes, RLM signal, goalie info...", height=80)
+    # ── helper to settle a bet ────────────────────────────────────────────────
+    def _settle_bet(row_id, result_str, price, size):
+        try:
+            from utils.db import get_client as _gc
+            price = int(price)
+            size  = float(size)
+            if result_str == "win":
+                pl = size * (price / 100) if price > 0 else size * (100 / abs(price))
+            elif result_str == "loss":
+                pl = -size
+            else:
+                pl = 0.0
+            _gc().table("bets").update({
+                "result":      result_str,
+                "profit_loss": round(pl, 2),
+            }).eq("id", str(row_id)).execute()
+            return True
+        except Exception as e:
+            st.error(f"Could not grade bet: {e}")
+            return False
 
-            if st.button("📓 Log Bet", use_container_width=True):
-                try:
-                    from utils.db import insert as db_insert
-                    db_insert("bets", [{
-                        "game_date":    date.today().isoformat(),
-                        "market":       bet_market,
-                        "outcome":      bet_outcome,
-                        "book":         bet_book,
-                        "price":        int(bet_price),
-                        "bet_size":     float(bet_size),
-                        "edge_at_bet":  float(bet_edge) / 100,
-                        "result":       "pending",
-                        "notes":        bet_notes,
-                    }])
-                    st.success("✅ Bet logged.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Could not log bet: {e}")
+    # ── GRADE PICKS section ───────────────────────────────────────────────────
+    pending = bets_df[bets_df["result"] == "pending"].copy() if not bets_df.empty else pd.DataFrame()
 
-    with jc2:
-        st.markdown("**Pending Bets**")
-        bets_df = safe_fetch("bets")
-        pending = bets_df[bets_df["result"] == "pending"] if not bets_df.empty else pd.DataFrame()
-        if pending.empty:
-            st.info("No pending bets.")
-        else:
-            for idx, row in pending.iterrows():
-                res_col1, res_col2 = st.columns([3,1])
-                with res_col1:
-                    st.markdown(f"""
-                    <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:6px; padding:10px; margin-bottom:8px;">
-                        <div style="font-size:13px; font-weight:600; color:#E2E2EE;">{row.get('outcome','')}</div>
-                        <div style="font-size:11px; color:#666688; font-family:'Space Mono',monospace;">
-                            {fmt_odds(row.get('price',0))} · ${row.get('bet_size',0):.0f} · {row.get('book','').replace('_bet','')}
-                        </div>
+    if not pending.empty:
+        st.markdown(f"""
+        <div style="background:#0D0D18; border:1px solid #FF6B35; border-left:4px solid #FF6B35;
+                    border-radius:10px; padding:16px 20px; margin-bottom:20px;">
+            <div style="font-size:13px; font-weight:700; color:#FF6B35; letter-spacing:0.5px; margin-bottom:2px;">
+                GRADE PICKS — {len(pending)} PENDING
+            </div>
+            <div style="font-size:11px; color:#444466; font-family:'Space Mono',monospace;">
+                Mark each bet as Win, Loss, or Push to track your P/L
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for idx, row in pending.iterrows():
+            price    = int(row.get("price", 0))
+            size     = float(row.get("bet_size", 0))
+            book     = str(row.get("book","")).replace("_bet","").replace("hardrockbet","hardrock")
+            outcome  = str(row.get("outcome",""))
+            market   = str(row.get("market","")).replace("player_","").replace("_"," ").title()
+            notes    = str(row.get("notes",""))
+            row_id   = row.get("id","")
+
+            # Calculate potential P/L for display
+            pot_win = size * (price / 100) if price > 0 else size * (100 / abs(price)) if price != 0 else 0
+
+            gc1, gc2, gc3, gc4, gc5 = st.columns([5, 1, 1, 1, 1])
+            with gc1:
+                st.markdown(f"""
+                <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:8px;
+                            padding:12px 16px; margin-bottom:6px;">
+                    <div style="font-size:14px; font-weight:700; color:#E2E2EE;">{outcome}</div>
+                    <div style="font-size:11px; color:#666688; font-family:'Space Mono',monospace; margin-top:2px;">
+                        {market} · {fmt_odds(price)} · ${size:.0f} · {book}
+                        {"· <span style='color:#00D4FF;'>+" + f"${pot_win:.2f}" + "</span> if win" if pot_win > 0 else ""}
                     </div>
-                    """, unsafe_allow_html=True)
-                with res_col2:
-                    result = st.selectbox("", ["—","Win","Loss","Push"], key=f"result_{idx}", label_visibility="collapsed")
-                    if result != "—":
-                        try:
-                            from utils.db import get_client as _gc
-                            price   = int(row.get("price", 0))
-                            size    = float(row.get("bet_size", 0))
-                            if result.lower() == "win":
-                                pl = size * (price/100) if price > 0 else size * (100/abs(price))
-                            elif result.lower() == "loss":
-                                pl = -size
-                            else:
-                                pl = 0.0
-                            _gc().table("bets").update({
-                                "result":      result.lower(),
-                                "profit_loss": round(pl, 2),
-                            }).eq("id", int(row["id"])).execute()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
+                    {"<div style='font-size:10px;color:#444466;margin-top:4px;'>" + notes + "</div>" if notes and notes != "None" else ""}
+                </div>
+                """, unsafe_allow_html=True)
+            with gc2:
+                st.markdown("<div style='padding-top:6px;'>", unsafe_allow_html=True)
+                if st.button("WIN", key=f"win_{idx}_{row_id}", use_container_width=True,
+                             help=f"+${pot_win:.2f}"):
+                    if _settle_bet(row_id, "win", price, size):
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            with gc3:
+                st.markdown("<div style='padding-top:6px;'>", unsafe_allow_html=True)
+                if st.button("LOSS", key=f"loss_{idx}_{row_id}", use_container_width=True):
+                    if _settle_bet(row_id, "loss", price, size):
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            with gc4:
+                st.markdown("<div style='padding-top:6px;'>", unsafe_allow_html=True)
+                if st.button("PUSH", key=f"push_{idx}_{row_id}", use_container_width=True):
+                    if _settle_bet(row_id, "push", price, size):
+                        st.rerun()
+                st.markdown("</div>", unsafe_allow_html=True)
+            with gc5:
+                st.markdown("<div style='padding-top:6px;'>", unsafe_allow_html=True)
+                if st.button("✕", key=f"del_{idx}_{row_id}", use_container_width=True,
+                             help="Remove bet"):
+                    try:
+                        from utils.db import get_client as _gc2
+                        _gc2().table("bets").delete().eq("id", str(row_id)).execute()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+                st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<hr style='border-color:#1A1A2A; margin:24px 0 20px;'>", unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:8px;
+                    padding:12px 20px; margin-bottom:20px; color:#444466; font-size:12px;">
+            No pending bets to grade.
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── LOG A BET ─────────────────────────────────────────────────────────────
+    with st.expander("➕ Log a New Bet", expanded=len(pending) == 0):
+        b1, b2 = st.columns(2)
+        with b1:
+            bet_outcome = st.text_input("Pick / Player", placeholder="e.g. VGK ML · MacKinnon Over 2.5 SOG")
+            bet_market  = st.selectbox("Market", [
+                "h2h", "spreads", "totals", "team_totals",
+                "player_shots_on_goal", "player_points",
+                "player_goals", "player_assists", "goalie_saves",
+            ])
+            bet_book = st.selectbox("Book", [
+                "draftkings", "fanduel", "betmgm",
+                "caesars", "bet365", "thescore_bet", "hardrockbet",
+            ])
+        with b2:
+            bet_price = st.number_input("Price (American)", value=-110, step=5)
+            bet_size  = st.number_input("Bet Size ($)", value=50.0, min_value=1.0, step=5.0)
+            bet_edge  = st.number_input("Edge at Bet (%)", value=0.0, min_value=0.0, step=0.5)
+
+        bet_notes = st.text_area("Notes (optional)", placeholder="RLM signal, goalie, matchup...", height=60)
+
+        if st.button("📓 Log Bet", use_container_width=True):
+            try:
+                from utils.db import insert as _db_ins
+                _db_ins("bets", [{
+                    "game_date":   date.today().isoformat(),
+                    "market":      bet_market,
+                    "outcome":     bet_outcome,
+                    "book":        bet_book,
+                    "price":       int(bet_price),
+                    "bet_size":    float(bet_size),
+                    "edge_at_bet": float(bet_edge) / 100,
+                    "result":      "pending",
+                    "notes":       bet_notes,
+                }])
+                st.success("Logged!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not log bet: {e}")
+
+    # ── RECENT RESULTS ────────────────────────────────────────────────────────
+    if not bets_df.empty:
+        settled = bets_df[bets_df["result"].isin(["win","loss","push"])].copy()
+        if not settled.empty:
+            st.markdown("""
+            <div style="font-size:11px; font-weight:600; color:#444466; letter-spacing:1.5px;
+                        text-transform:uppercase; margin:4px 0 12px;">Recent Results</div>
+            """, unsafe_allow_html=True)
+
+            settled["profit_loss"] = pd.to_numeric(settled.get("profit_loss", pd.Series()), errors="coerce").fillna(0)
+            recent = settled.sort_values("created_at", ascending=False).head(20) if "created_at" in settled.columns else settled.head(20)
+
+            for _, row in recent.iterrows():
+                res     = str(row.get("result","")).upper()
+                pl      = float(row.get("profit_loss", 0))
+                outcome = str(row.get("outcome",""))
+                price   = int(row.get("price", 0))
+                size    = float(row.get("bet_size", 0))
+                book    = str(row.get("book","")).replace("_bet","").replace("hardrockbet","hardrock")
+
+                res_color = "#00FF88" if res == "WIN" else ("#FF4444" if res == "LOSS" else "#FFD700")
+                pl_color  = "#00FF88" if pl >= 0 else "#FF4444"
+
+                st.markdown(f"""
+                <div style="background:#0D0D18; border:1px solid #1E1E30; border-radius:8px;
+                            padding:10px 16px; margin-bottom:6px;
+                            display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <span style="background:{res_color}20;border:1px solid {res_color}40;color:{res_color};
+                                     border-radius:4px;padding:2px 8px;font-size:10px;font-weight:700;
+                                     font-family:'Space Mono',monospace;margin-right:10px;">{res}</span>
+                        <span style="font-size:13px;font-weight:600;color:#E2E2EE;">{outcome}</span>
+                        <span style="font-size:11px;color:#444466;font-family:'Space Mono',monospace;margin-left:8px;">
+                            {fmt_odds(price)} · ${size:.0f} · {book}
+                        </span>
+                    </div>
+                    <span style="font-family:'Space Mono',monospace;font-size:14px;font-weight:700;color:{pl_color};">
+                        {f"+${pl:.2f}" if pl >= 0 else f"-${abs(pl):.2f}"}
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
