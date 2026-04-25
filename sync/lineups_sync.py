@@ -36,33 +36,34 @@ def fetch_nhl_api_lineups() -> list[dict]:
         for game_week in data.get("gameWeek", []):
             for game in game_week.get("games", []):
                 game_id = str(game.get("id", ""))
-                for side in ("homeTeam", "awayTeam"):
-                    team  = game.get(side, {})
-                    abbr  = team.get("abbrev", "")
-                    # NHL API game endpoint for lineup details
-                    game_url = f"{NHL_API_BASE}/gamecenter/{game_id}/play-by-play"
-                    try:
-                        gr   = requests.get(game_url, timeout=10)
-                        gd   = gr.json()
-                        roster_spots = gd.get("rosterSpots", [])
-                        for spot in roster_spots:
-                            if spot.get("teamAbbrev") != abbr:
-                                continue
-                            name  = f"{spot.get('firstName',{}).get('default','')} {spot.get('lastName',{}).get('default','')}".strip()
-                            pos   = spot.get("positionCode", "")
-                            rows.append({
-                                "id":          _make_id(game_id, abbr, name),
-                                "game_id":     game_id,
-                                "team_abbr":   abbr,
-                                "player_name": name,
-                                "position":    pos,
-                                "line_number": None,
-                                "pp_unit":     None,
-                                "toi_projection": None,
-                                "updated_at":  datetime.now(timezone.utc).isoformat(),
-                            })
-                    except Exception:
-                        pass
+                team_id_to_abbr = {
+                    game.get("homeTeam", {}).get("id"): game.get("homeTeam", {}).get("abbrev", ""),
+                    game.get("awayTeam", {}).get("id"): game.get("awayTeam", {}).get("abbrev", ""),
+                }
+                game_url = f"{NHL_API_BASE}/gamecenter/{game_id}/play-by-play"
+                try:
+                    gr   = requests.get(game_url, timeout=10)
+                    gd   = gr.json()
+                    roster_spots = gd.get("rosterSpots", [])
+                    for spot in roster_spots:
+                        abbr = team_id_to_abbr.get(spot.get("teamId"), "")
+                        if not abbr:
+                            continue
+                        name = f"{spot.get('firstName',{}).get('default','')} {spot.get('lastName',{}).get('default','')}".strip()
+                        pos  = spot.get("positionCode", "")
+                        rows.append({
+                            "id":          _make_id(game_id, abbr, name),
+                            "game_id":     game_id,
+                            "team_abbr":   abbr,
+                            "player_name": name,
+                            "position":    pos,
+                            "line_number": None,
+                            "pp_unit":     None,
+                            "toi_projection": None,
+                            "updated_at":  datetime.now(timezone.utc).isoformat(),
+                        })
+                except Exception:
+                    pass
     except Exception as e:
         print(f"[lineups] NHL API error: {e}")
     return rows
@@ -73,80 +74,78 @@ def fetch_nhl_api_lineups() -> list[dict]:
 def scrape_rotowire_lineups() -> list[dict]:
     """
     Rotowire posts projected line combos by ~11am ET on game days.
-    Captures forward lines (L1–L4), defensive pairs, PP units.
+    Captures starting goalies and PP units (PP1/PP2). Forward lines are not
+    explicitly delineated in the current Rotowire markup — only PP groupings
+    are clearly bucketed via section titles.
     """
     rows = []
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; NHLModel/1.0)"}
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"}
         resp    = requests.get(ROTOWIRE_LINEUPS, headers=headers, timeout=15)
         soup    = BeautifulSoup(resp.text, "lxml")
+        today   = date.today().isoformat()
 
-        team_sections = soup.find_all("div", class_=re.compile(r"lineup__team|nhl-lineup", re.I))
-        for section in team_sections:
-            try:
-                team_el = section.find(class_=re.compile(r"lineup__team-name|team-name", re.I))
-                if not team_el:
-                    continue
-                abbr    = name_to_abbr(team_el.get_text(strip=True))
-                game_id = ""  # enriched later by joining on team + date
-
-                # Forward lines
-                line_els = section.find_all(class_=re.compile(r"lineup__line|forward-line", re.I))
-                for line_num, line_el in enumerate(line_els, 1):
-                    players = line_el.find_all(class_=re.compile(r"lineup__player|player-name", re.I))
-                    for player_el in players:
-                        name = player_el.get_text(strip=True)
-                        rows.append({
-                            "id":          _make_id(date.today().isoformat(), abbr, name),
-                            "game_id":     game_id,
-                            "team_abbr":   abbr,
-                            "player_name": name,
-                            "position":    "F",
-                            "line_number": line_num,
-                            "pp_unit":     None,
-                            "toi_projection": _toi_by_line(line_num, "F"),
-                            "updated_at":  datetime.now(timezone.utc).isoformat(),
-                        })
-
-                # Defensive pairs
-                pair_els = section.find_all(class_=re.compile(r"lineup__pair|defense-pair", re.I))
-                for pair_num, pair_el in enumerate(pair_els, 1):
-                    players = pair_el.find_all(class_=re.compile(r"lineup__player|player-name", re.I))
-                    for player_el in players:
-                        name = player_el.get_text(strip=True)
-                        rows.append({
-                            "id":          _make_id(date.today().isoformat(), abbr, name),
-                            "game_id":     game_id,
-                            "team_abbr":   abbr,
-                            "player_name": name,
-                            "position":    "D",
-                            "line_number": pair_num,
-                            "pp_unit":     None,
-                            "toi_projection": _toi_by_line(pair_num, "D"),
-                            "updated_at":  datetime.now(timezone.utc).isoformat(),
-                        })
-
-                # PP units
-                pp_els = section.find_all(class_=re.compile(r"lineup__pp|power-play", re.I))
-                for pp_num, pp_el in enumerate(pp_els, 1):
-                    players = pp_el.find_all(class_=re.compile(r"lineup__player|player-name", re.I))
-                    for player_el in players:
-                        name = player_el.get_text(strip=True)
-                        # Update existing row PP unit
-                        rows.append({
-                            "id":          _make_id(date.today().isoformat(), abbr, name),
-                            "game_id":     game_id,
-                            "team_abbr":   abbr,
-                            "player_name": name,
-                            "position":    None,
-                            "line_number": None,
-                            "pp_unit":     pp_num,
-                            "toi_projection": None,
-                            "updated_at":  datetime.now(timezone.utc).isoformat(),
-                        })
-
-            except Exception:
+        for matchup in soup.find_all(class_="lineup"):
+            abbr_els = matchup.find_all(class_="lineup__abbr")
+            if len(abbr_els) < 2:
                 continue
+            visit_abbr = abbr_els[0].get_text(strip=True)
+            home_abbr  = abbr_els[1].get_text(strip=True)
+
+            for ul in matchup.find_all("ul", class_="lineup__list"):
+                cls   = ul.get("class", [])
+                abbr  = visit_abbr if "is-visit" in cls else (home_abbr if "is-home" in cls else "")
+                if not abbr:
+                    continue
+
+                # Goalie
+                for hl in ul.find_all("li", class_="lineup__player-highlight"):
+                    name_el = hl.find(class_="lineup__player-highlight-name")
+                    name    = name_el.get_text(strip=True) if name_el else hl.get_text(strip=True).split("Confirmed")[0].strip()
+                    if not name:
+                        continue
+                    rows.append({
+                        "id":          _make_id(today, abbr, name),
+                        "game_id":     "",
+                        "team_abbr":   abbr,
+                        "player_name": name,
+                        "position":    "G",
+                        "line_number": None,
+                        "pp_unit":     None,
+                        "toi_projection": None,
+                        "updated_at":  datetime.now(timezone.utc).isoformat(),
+                    })
+
+                # Walk items in document order to track which PP unit each player belongs to
+                pp_unit = None
+                for li in ul.find_all("li", recursive=False):
+                    li_cls = li.get("class", [])
+                    if "lineup__title" in li_cls:
+                        title_text = li.get_text(" ", strip=True).upper()
+                        m = re.search(r"POWER PLAY\s*#?\s*(\d+)", title_text)
+                        pp_unit = int(m.group(1)) if m else None
+                        continue
+                    if "lineup__player" not in li_cls:
+                        continue
+
+                    pos_el = li.find(class_="lineup__pos")
+                    pos    = pos_el.get_text(strip=True) if pos_el else ""
+                    raw    = li.get_text(" ", strip=True)
+                    name   = raw[len(pos):].strip() if pos and raw.startswith(pos) else raw
+                    if not name:
+                        continue
+
+                    rows.append({
+                        "id":          _make_id(today, abbr, name),
+                        "game_id":     "",
+                        "team_abbr":   abbr,
+                        "player_name": name,
+                        "position":    pos or None,
+                        "line_number": None,
+                        "pp_unit":     pp_unit,
+                        "toi_projection": None,
+                        "updated_at":  datetime.now(timezone.utc).isoformat(),
+                    })
 
     except Exception as e:
         print(f"[lineups] Rotowire scrape error: {e}")

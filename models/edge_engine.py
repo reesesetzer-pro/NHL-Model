@@ -270,7 +270,9 @@ def calculate_all_prop_edges() -> list[dict]:
     probabilities even when the pure edge is ~0.
     """
     now       = datetime.now(timezone.utc).isoformat()
-    today_str = _date.today().isoformat()
+    import pytz as _pytz
+    _ET = _pytz.timezone("America/New_York")
+    today_str = datetime.now(_ET).date().isoformat()
     results   = []
 
     games_df = fetch("games")
@@ -283,6 +285,44 @@ def calculate_all_prop_edges() -> list[dict]:
 
     lineup_df   = fetch("lineups")
     injuries_df = fetch("injuries")
+    goalies_df  = fetch("goalies")
+    team_stats  = fetch("team_stats")
+
+    # Team defense lookup: team_abbr -> xga_per60 (regular season "all" situation)
+    team_xga: dict = {}
+    if not team_stats.empty:
+        ts_all = team_stats[(team_stats["situation"] == "all") & (team_stats["season_type"] == "regular")]
+        for _, r in ts_all.iterrows():
+            v = r.get("xga_per60")
+            if v is not None:
+                try: team_xga[str(r["team_abbr"])] = float(v)
+                except: pass
+    league_xga = (sum(team_xga.values()) / len(team_xga)) if team_xga else 2.95
+
+    # Goalie SV% lookup: team_abbr -> best (most recently updated) SV% of starters
+    team_goalie_sv: dict = {}
+    if not goalies_df.empty:
+        # Prefer confirmed status, then projected_high
+        priority = {"confirmed": 0, "projected_high": 1, "projected_model": 2, "conflicting": 3, "unconfirmed": 4}
+        gd = goalies_df.copy()
+        gd["_p"] = gd["status"].map(lambda s: priority.get(str(s), 9))
+        gd = gd.sort_values(["team_abbr", "_p", "updated_at"], ascending=[True, True, False])
+        for abbr, grp in gd.groupby("team_abbr"):
+            top = grp.iloc[0]
+            sv  = top.get("sv_pct_season")
+            try:
+                if sv is not None:
+                    team_goalie_sv[str(abbr)] = float(sv)
+            except: pass
+    league_sv = (sum(team_goalie_sv.values()) / len(team_goalie_sv)) if team_goalie_sv else 0.905
+
+    # Game opponent map: game_id -> {home_abbr, away_abbr}
+    game_teams: dict = {}
+    for _, g in games_df.iterrows():
+        game_teams[str(g["id"])] = {
+            "home_abbr": str(g.get("home_abbr", "")),
+            "away_abbr": str(g.get("away_abbr", "")),
+        }
 
     # Index injuries for fast lookup
     injured_names: set = set()
@@ -381,6 +421,37 @@ def calculate_all_prop_edges() -> list[dict]:
                 if line_num == 1:
                     model_prob += 0.02
 
+            # Opponent goalie + defense adjustment for scoring/shot props.
+            # When a player's team is known, look up the OPPONENT's starter SV%
+            # and team xGA/60 — strong defense suppresses skater overs, weak
+            # defense boosts them. Saves market is opposite — boost the goalie
+            # over when facing a high-shot opponent.
+            if team_abbr and market in _SCORING_PROPS:
+                gt = game_teams.get(game_id, {})
+                opp_abbr = gt.get("away_abbr") if team_abbr == gt.get("home_abbr") else gt.get("home_abbr")
+                if opp_abbr:
+                    # Goalie SV% bump: each 0.010 above league avg → -3pp scoring
+                    opp_sv = team_goalie_sv.get(opp_abbr)
+                    if opp_sv is not None:
+                        sv_delta = opp_sv - league_sv
+                        model_prob += -3.0 * sv_delta  # 0.020 above avg → -6pp; 0.020 below → +6pp
+                    # Team xGA bump: each 0.20 xGA/60 above league avg → +2pp scoring
+                    opp_xga = team_xga.get(opp_abbr)
+                    if opp_xga is not None:
+                        xga_delta = opp_xga - league_xga
+                        model_prob += (xga_delta / 0.20) * 0.02
+            elif team_abbr and market == "player_total_saves":
+                gt = game_teams.get(game_id, {})
+                opp_abbr = gt.get("away_abbr") if team_abbr == gt.get("home_abbr") else gt.get("home_abbr")
+                if opp_abbr:
+                    # High-volume opponent (high xGF) → more shots faced → goalie over
+                    opp_xgf = next((float(r["xgf_per60"]) for _, r in team_stats.iterrows()
+                                    if str(r.get("team_abbr"))==opp_abbr and r.get("situation")=="all"
+                                    and r.get("season_type")=="regular" and r.get("xgf_per60") is not None), None)
+                    if opp_xgf is not None:
+                        league_xgf = league_xga  # symmetric assumption
+                        model_prob += ((opp_xgf - league_xgf) / 0.20) * 0.02
+
             # Clamp
             model_prob = min(max(model_prob, 0.01), 0.99)
             edge = model_prob - no_vig_over
@@ -432,13 +503,27 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
     if game_id:
         games_df = games_df[games_df["id"] == game_id]
     else:
-        # Only process today and future games — skip stale regular season rows
-        from datetime import date as _date
-        today_str = _date.today().isoformat()
+        # Only process today and future games — skip stale regular season rows.
+        # Use ET (matches game_date in DB) so a UTC server doesn't roll the date
+        # over and exclude tonight's games after 8 PM ET.
+        import pytz as _pytz
+        _ET = _pytz.timezone("America/New_York")
+        today_str = datetime.now(_ET).date().isoformat()
         if "game_date" in games_df.columns:
             games_df = games_df[games_df["game_date"] >= today_str]
 
-    odds_df = fetch("odds", limit=5000)
+    target_ids = games_df["id"].tolist()
+    if not target_ids:
+        return edges
+    from utils.db import get_client
+    odds_resp = (
+        get_client()
+        .table("odds")
+        .select("*")
+        .in_("game_id", target_ids)
+        .execute()
+    )
+    odds_df = pd.DataFrame(odds_resp.data) if odds_resp.data else pd.DataFrame()
     if odds_df.empty:
         return edges
 

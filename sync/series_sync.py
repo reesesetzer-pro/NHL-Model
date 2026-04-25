@@ -10,7 +10,7 @@ import hashlib
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional
 
-from config import NHL_API_BASE, CURRENT_SEASON_API
+from config import NHL_API_BASE, CURRENT_SEASON_API, NHL_TEAMS
 from utils.db import upsert, fetch
 
 
@@ -25,7 +25,7 @@ def fetch_playoff_bracket() -> list[dict]:
     Pull playoff series from NHL API carousel endpoint.
     Returns a flat list of series dicts.
     """
-    url = f"{NHL_API_BASE}/playoffs/carousel/{CURRENT_SEASON_API}"
+    url = f"{NHL_API_BASE}/playoff-series/carousel/{CURRENT_SEASON_API}"
     try:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
@@ -39,19 +39,21 @@ def fetch_playoff_bracket() -> list[dict]:
         round_num = rnd.get("roundNumber", 0)
         round_name = {1: "First Round", 2: "Second Round", 3: "Conference Finals", 4: "Stanley Cup Final"}.get(round_num, f"Round {round_num}")
         for series in rnd.get("series", []):
-            top    = series.get("topSeedTeam", {})
-            bottom = series.get("bottomSeedTeam", {})
+            top    = series.get("topSeed", {})
+            bottom = series.get("bottomSeed", {})
+            top_abbr    = top.get("abbrev", "")
+            bottom_abbr = bottom.get("abbrev", "")
             series_list.append({
                 "round_number": round_num,
                 "round_name":   round_name,
                 "series_letter": series.get("seriesLetter", ""),
-                "team1_abbr":   top.get("abbrev", ""),
-                "team1_name":   top.get("commonName", {}).get("default", top.get("name", {}).get("default", "")),
-                "team1_wins":   series.get("topSeedWins", 0),
-                "team2_abbr":   bottom.get("abbrev", ""),
-                "team2_name":   bottom.get("commonName", {}).get("default", bottom.get("name", {}).get("default", "")),
-                "team2_wins":   series.get("bottomSeedWins", 0),
-                "series_status": series.get("seriesStatus", series.get("status", "")),
+                "team1_abbr":   top_abbr,
+                "team1_name":   NHL_TEAMS.get(top_abbr, top_abbr),
+                "team1_wins":   top.get("wins", 0),
+                "team2_abbr":   bottom_abbr,
+                "team2_name":   NHL_TEAMS.get(bottom_abbr, bottom_abbr),
+                "team2_wins":   bottom.get("wins", 0),
+                "series_status": series.get("seriesLabel", ""),
             })
 
     return series_list

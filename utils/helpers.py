@@ -15,23 +15,38 @@ def logo_html(abbr: str, size: int = 48) -> str:
 # ── Team name resolution ──────────────────────────────────────────────────────
 _ALIAS_MAP = {
     "utah hockey club": "UTA",
-    "utah": "UTA",
-    "arizona coyotes": "UTA",  # historical alias → Utah
-    "coyotes": "UTA",
+    "utah mammoth":     "UTA",
+    "mammoth":          "UTA",
+    "utah":             "UTA",
+    "arizona coyotes":  "UTA",  # historical alias → Utah
+    "coyotes":          "UTA",
+    "montréal canadiens": "MTL",
+    "montreal canadiens": "MTL",
+    "canadiens":        "MTL",
+    "canadians":        "MTL",
 }
+
+def _strip_accents(s: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
 
 def name_to_abbr(name: str) -> str:
     """Convert full team name from Odds API to abbreviation."""
     # Direct lookup
     if name in TEAM_NAME_TO_ABBR:
         return TEAM_NAME_TO_ABBR[name]
+    # Accent-stripped lookup (e.g. "Montréal Canadiens" → "Montreal Canadiens")
+    stripped = _strip_accents(name)
+    if stripped in TEAM_NAME_TO_ABBR:
+        return TEAM_NAME_TO_ABBR[stripped]
     # Alias map (handles relocated teams, alternate names)
-    lower = name.lower().strip()
+    lower = stripped.lower().strip()
     if lower in _ALIAS_MAP:
         return _ALIAS_MAP[lower]
     # Partial match on nickname
     for full, abbr in TEAM_NAME_TO_ABBR.items():
-        if name.lower() in full.lower() or full.lower() in name.lower():
+        if lower in full.lower() or full.lower() in lower:
             return abbr
     return name[:3].upper()
 

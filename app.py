@@ -16,7 +16,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import pytz
 import os
 
@@ -230,7 +230,35 @@ def safe_fetch(table, filters=None, limit=500):
 
 
 def now_et():
+    """Always returns 'now' in Eastern Time. NHL game_date in Supabase is
+    stored in ET (computed in odds_sync), so all 'today' filtering must use
+    ET to align — otherwise running on a UTC server rolls the date wrong
+    after 8 PM ET."""
     return datetime.now(ET)
+
+
+def to_local(dt: datetime) -> datetime:
+    """Convert a tz-aware datetime to the system local timezone for display.
+    Falls back to ET if the system clock resolves to UTC."""
+    try:
+        out = dt.astimezone()
+        if out.utcoffset() == timedelta(0):
+            return dt.astimezone(ET)
+        return out
+    except Exception:
+        return dt.astimezone(ET)
+
+
+def fmt_game_time(commence_iso: str) -> str:
+    """Format a UTC commence_time ISO string as 'HH:MM AM/PM <TZ>' in the
+    user's local timezone. Falls back to ET if local TZ is UTC."""
+    try:
+        dt = datetime.fromisoformat(commence_iso.replace("Z", "+00:00"))
+        local = to_local(dt)
+        tz_label = local.tzname() or "ET"
+        return local.strftime(f"%I:%M %p {tz_label}").lstrip("0")
+    except Exception:
+        return "TBD"
 
 
 def fmt_odds(v):
@@ -285,7 +313,7 @@ with col_time:
     st.markdown(f"""
     <div style='text-align:right; padding-top:16px;'>
         <div style='font-family:"Space Mono",monospace; font-size:13px; color:#00D4FF;'>{now_et().strftime('%a %b %d')}</div>
-        <div style='font-family:"Space Mono",monospace; font-size:11px; color:#444466;'>{now_et().strftime('%I:%M %p ET')}</div>
+        <div style='font-family:"Space Mono",monospace; font-size:11px; color:#444466;'>{to_local(datetime.now(ET)).strftime('%I:%M %p ' + (to_local(datetime.now(ET)).tzname() or 'ET'))}</div>
     </div>
     """, unsafe_allow_html=True)
 with col_logbet:
@@ -294,7 +322,7 @@ with col_logbet:
         st.markdown("#### Log a Bet")
 
         games_for_log = safe_fetch("games")
-        today_str     = date.today().isoformat()
+        today_str     = now_et().date().isoformat()
         if not games_for_log.empty and "game_date" in games_for_log.columns:
             upcoming = games_for_log[games_for_log["game_date"] >= today_str].copy()
         else:
@@ -403,7 +431,7 @@ with tabs[0]:
     rlm_df     = safe_fetch("rlm_signals")
     inj_df     = safe_fetch("injuries")
 
-    today = date.today().isoformat()
+    today = now_et().date().isoformat()
     if not games_df.empty and "game_date" in games_df.columns:
         games_df = games_df[games_df["game_date"] == today]
 
@@ -435,16 +463,8 @@ with tabs[0]:
             home_abbr = game.get("home_abbr", "")
             away_abbr = game.get("away_abbr", "")
 
-            try:
-                import pytz as _tz
-                ct = game.get("commence_time", "")
-                if ct:
-                    dt = datetime.fromisoformat(ct.replace("Z","+00:00")).astimezone(ET)
-                    game_time = dt.strftime("%I:%M %p ET")
-                else:
-                    game_time = "TBD"
-            except Exception:
-                game_time = "TBD"
+            ct = game.get("commence_time", "")
+            game_time = fmt_game_time(ct) if ct else "TBD"
 
             # Game-level RLM
             game_rlm = rlm_df[rlm_df["game_id"] == gid] if not rlm_df.empty else pd.DataFrame()
@@ -620,7 +640,7 @@ with tabs[1]:
 
     # ── Game-level edges ──────────────────────────────────────────────────────
     if not edges_df.empty:
-        today = date.today().isoformat()
+        today = now_et().date().isoformat()
         # Join game info
         if not games_df.empty and "game_date" in games_df.columns:
             today_games = games_df[games_df["game_date"] == today]
@@ -706,8 +726,8 @@ with tabs[1]:
                         <div style="font-size:10px; color:#444466;">{book}</div>
                       </div>
                       <div style="text-align:center;">
-                        <div style="font-size:10px; color:#444466; margin-bottom:2px;">MODEL</div>
-                        <div style="font-family:'Space Mono',monospace; font-size:13px; color:#B8B8D4;">{m_prob*100:.1f}%</div>
+                        <div style="font-size:10px; color:#444466; margin-bottom:2px;">WIN %</div>
+                        <div style="font-family:'Space Mono',monospace; font-size:13px; color:#00D4FF; font-weight:700;">{m_prob*100:.1f}%</div>
                       </div>
                       <div style="text-align:center;">
                         <div style="font-size:10px; color:#444466; margin-bottom:2px;">MKT NO-VIG</div>
@@ -777,8 +797,8 @@ with tabs[1]:
                       <div style="font-size:10px; color:#444466;">{book}</div>
                     </div>
                     <div style="text-align:center;">
-                      <div style="font-size:10px; color:#444466;">MODEL</div>
-                      <div style="font-family:'Space Mono',monospace; font-size:12px; color:#B8B8D4;">{m_prob*100:.1f}%</div>
+                      <div style="font-size:10px; color:#444466;">WIN %</div>
+                      <div style="font-family:'Space Mono',monospace; font-size:12px; color:#00D4FF; font-weight:700;">{m_prob*100:.1f}%</div>
                     </div>
                     <div style="text-align:center;">
                       <div style="font-size:10px; color:#444466;">MKT NO-VIG</div>
@@ -901,7 +921,7 @@ with tabs[3]:
     if history_df.empty or games_df.empty:
         st.info("No line movement data yet. Odds history builds as the day progresses.")
     else:
-        today_games = games_df[games_df["game_date"] == date.today().isoformat()] if "game_date" in games_df.columns else games_df
+        today_games = games_df[games_df["game_date"] == now_et().date().isoformat()] if "game_date" in games_df.columns else games_df
         game_options = {
             f"{row['away_abbr']} @ {row['home_abbr']}": row["id"]
             for _, row in today_games.iterrows()
@@ -1014,7 +1034,7 @@ with tabs[4]:
             props_df["game_label"] = props_df["game_id"].map(game_map).fillna("")
             props_df["game_date"]  = props_df["game_id"].map(game_date_map).fillna("")
             # Keep only props for today/tomorrow games
-            today_str_pf = date.today().isoformat()
+            today_str_pf = now_et().date().isoformat()
             props_df = props_df[props_df["game_date"] >= today_str_pf]
 
         # ── Remove injured players ────────────────────────────────────────────
@@ -1615,7 +1635,7 @@ with tabs[8]:
             try:
                 from utils.db import insert as _db_ins
                 _db_ins("bets", [{
-                    "game_date":   date.today().isoformat(),
+                    "game_date":   now_et().date().isoformat(),
                     "market":      bet_market,
                     "outcome":     bet_outcome,
                     "book":        bet_book,

@@ -9,6 +9,7 @@ Four-tier goalie projection pipeline:
 
 import requests
 import hashlib
+import json
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional
 import re
@@ -30,46 +31,50 @@ def _make_id(*parts) -> str:
 # ── Tier 1: Daily Faceoff scrape ──────────────────────────────────────────────
 
 def scrape_daily_faceoff() -> list[dict]:
-    """Scrape projected starters from Daily Faceoff."""
+    """Pull projected starters from Daily Faceoff Next.js page payload."""
     projections = []
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; NHLModel/1.0)"}
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"}
         resp = requests.get(DAILYFACEOFF_URL, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "lxml")
 
-        # Daily Faceoff goalie rows — class varies, scrape broadly
-        goalie_sections = soup.find_all("div", class_=re.compile(r"starting-goalie|goalie-card", re.I))
+        nd = soup.find("script", id="__NEXT_DATA__")
+        if not nd:
+            print("[goalies] Daily Faceoff: __NEXT_DATA__ not found")
+            return projections
 
-        for section in goalie_sections:
-            try:
-                team_el = section.find(class_=re.compile(r"team|abbr", re.I))
-                name_el = section.find(class_=re.compile(r"goalie|player", re.I))
-                conf_el = section.find(class_=re.compile(r"confirm|status|confidence", re.I))
+        data = json.loads(nd.text)
+        games = data.get("props", {}).get("pageProps", {}).get("data", []) or []
 
-                if not team_el or not name_el:
+        for g in games:
+            for side in ("home", "away"):
+                team_name   = g.get(f"{side}TeamName") or ""
+                team_abbr   = name_to_abbr(team_name) if team_name else ""
+                player_name = g.get(f"{side}GoalieName") or ""
+                status_raw  = (g.get(f"{side}NewsStrengthName") or "").lower()
+
+                if not (team_abbr and player_name):
                     continue
 
-                team_text = team_el.get_text(strip=True)
-                name_text = name_el.get_text(strip=True)
-                conf_text = (conf_el.get_text(strip=True) if conf_el else "").lower()
-
-                abbr = name_to_abbr(team_text)
-                if "confirmed" in conf_text or "confirm" in conf_text:
+                if "confirmed" in status_raw:
                     status = "confirmed"
-                elif "likely" in conf_text or "probable" in conf_text or "expected" in conf_text:
+                elif "likely" in status_raw or "probable" in status_raw or "expected" in status_raw:
                     status = "projected_high"
                 else:
                     status = "projected_model"
 
+                def _f(v):
+                    try: return float(v) if v not in (None, "") else None
+                    except: return None
+
                 projections.append({
-                    "team_abbr":   abbr,
-                    "player_name": name_text,
-                    "status":      status,
-                    "confidence":  "high",
-                    "source":      "daily_faceoff",
+                    "team_abbr":     team_abbr,
+                    "player_name":   player_name,
+                    "status":        status,
+                    "confidence":    "high",
+                    "source":        "daily_faceoff",
+                    "sv_pct_season": _f(g.get(f"{side}GoalieSavePercentage")),
                 })
-            except Exception:
-                continue
 
     except Exception as e:
         print(f"[goalies] Daily Faceoff scrape error: {e}")
@@ -218,13 +223,14 @@ def run_goalie_sync() -> None:
             continue  # already confirmed
         row_id = _make_id(date.today().isoformat(), rec["team_abbr"])
         rows.append({
-            "id":          row_id,
-            "team_abbr":   rec["team_abbr"],
-            "player_name": rec.get("player_name"),
-            "status":      rec["status"],
-            "confidence":  rec["confidence"],
-            "source":      rec["source"],
-            "updated_at":  now,
+            "id":            row_id,
+            "team_abbr":     rec["team_abbr"],
+            "player_name":   rec.get("player_name"),
+            "status":        rec["status"],
+            "confidence":    rec["confidence"],
+            "source":        rec["source"],
+            "sv_pct_season": rec.get("sv_pct_season"),
+            "updated_at":    now,
         })
 
     # Detect conflicts — same team has multiple rows with different player names

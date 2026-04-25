@@ -8,6 +8,7 @@ import requests
 import hashlib
 import re
 from datetime import datetime, timezone
+from typing import Optional
 from bs4 import BeautifulSoup
 
 from config import ROTOWIRE_INJURIES, NHL_API_BASE
@@ -42,64 +43,74 @@ def _normalize_status(raw: str) -> str:
 # ── NHL API injuries ──────────────────────────────────────────────────────────
 
 def fetch_nhl_api_injuries() -> list[dict]:
-    rows = []
-    try:
-        # NHL API doesn't have a direct /injuries endpoint; pull from roster
-        # with injuryStatus flags
-        url = f"{NHL_API_BASE}/injury"
-        resp = requests.get(url, timeout=15)
-        data = resp.json()
-        for item in data.get("injuries", []):
-            name    = item.get("playerName", {}).get("default", "")
-            team    = item.get("teamAbbrev", {}).get("default", "")
-            status  = item.get("injuryStatus", "")
-            details = item.get("injuryType", "")
-            rows.append({
-                "id":          _make_id(name, team),
-                "player_name": name,
-                "team_abbr":   team,
-                "position":    item.get("position", ""),
-                "status":      _normalize_status(status),
-                "notes":       details,
-                "updated_at":  datetime.now(timezone.utc).isoformat(),
-            })
-    except Exception as e:
-        print(f"[injuries] NHL API error: {e}")
-    return rows
+    # NHL public API does not expose an injury endpoint. Sourcing entirely from Rotowire.
+    return []
 
 
 # ── Rotowire scrape ───────────────────────────────────────────────────────────
 
+_INJURY_KEYWORDS = re.compile(
+    r"\b(injur|placed on (?:ir|ltir)|day[\s-]to[\s-]day|out (?:for|indefinitely|of)|"
+    r"upper[\s-]body|lower[\s-]body|undisclosed|concussion|surgery|will not (?:play|dress)|"
+    r"won't (?:play|dress)|out tonight|sidelined|miss(?:ed)?\s+(?:game|tonight))\b",
+    re.I,
+)
+
+
+def _detect_status(text: str) -> Optional[str]:
+    t = text.lower()
+    if any(k in t for k in ("ltir", "long-term injured", "out indefinitely", "season-ending", "out for the season")):
+        return "out"
+    if "placed on ir" in t or "on ir" in t:
+        return "out"
+    if "out tonight" in t or "won't play" in t or "will not play" in t or "won't dress" in t:
+        return "out"
+    if "doubtful" in t:
+        return "doubtful"
+    if "day-to-day" in t or "day to day" in t:
+        return "day-to-day"
+    if "questionable" in t:
+        return "questionable"
+    return None
+
+
 def scrape_rotowire_injuries() -> list[dict]:
+    """Scrape Rotowire NHL news feed and emit rows only for items that
+    actually describe an injury / availability change."""
     rows = []
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; NHLModel/1.0)"}
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"}
         resp = requests.get(ROTOWIRE_INJURIES, headers=headers, timeout=15)
         soup = BeautifulSoup(resp.text, "lxml")
 
-        news_items = soup.find_all("li", class_=re.compile(r"news-feed__item|player-injury", re.I))
-        for item in news_items:
+        for item in soup.find_all(class_="news-update"):
             try:
-                name_el   = item.find(class_=re.compile(r"player-name|news-feed__player", re.I))
-                team_el   = item.find(class_=re.compile(r"team|news-feed__team", re.I))
-                status_el = item.find(class_=re.compile(r"status|injury-status", re.I))
-                notes_el  = item.find(class_=re.compile(r"notes|news-feed__analysis", re.I))
-
+                name_el = item.find(class_="news-update__player-link")
                 if not name_el:
                     continue
+                name = name_el.get_text(strip=True)
 
-                name   = name_el.get_text(strip=True)
-                team   = name_to_abbr(team_el.get_text(strip=True)) if team_el else ""
-                status = _normalize_status(status_el.get_text(strip=True)) if status_el else "questionable"
-                notes  = notes_el.get_text(strip=True)[:500] if notes_el else ""
+                logo_el = item.find("img", class_="news-update__logo")
+                team    = (logo_el.get("alt") if logo_el else "") or ""
+
+                pos_el  = item.find(class_="news-update__pos")
+                pos     = pos_el.get_text(strip=True) if pos_el else ""
+
+                news_el = item.find(class_="news-update__news")
+                notes   = news_el.get_text(" ", strip=True) if news_el else ""
+
+                if not _INJURY_KEYWORDS.search(notes):
+                    continue
+
+                status = _detect_status(notes) or "questionable"
 
                 rows.append({
                     "id":          _make_id(name, team),
                     "player_name": name,
                     "team_abbr":   team,
-                    "position":    "",
+                    "position":    pos,
                     "status":      status,
-                    "notes":       notes,
+                    "notes":       notes[:500],
                     "updated_at":  datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
