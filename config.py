@@ -36,6 +36,7 @@ NHL_SPORT_KEY       = "icehockey_nhl"
 BOOKS = [
     "draftkings",
     "fanduel",
+    "fanatics",
     "thescore_bet",
     "betmgm",
     "caesars",
