@@ -22,6 +22,8 @@ from utils.db import upsert, fetch
 from utils.helpers import (
     american_to_implied, remove_vig, implied_to_american, format_odds
 )
+from models.calibration import load_calibration_lookup, calibrate_prob
+from models.auto_log_picks import shadow_log_edges
 from models.kelly import kelly_criterion
 from models.win_probability import model_probability
 
@@ -516,8 +518,19 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
     if not target_ids:
         return edges
     from utils.db import get_client
+    client = get_client()
+
+    # Clean any prior edge rows for today's games — the ID hash includes the
+    # date so old runs from prior days don't get overwritten on upsert and
+    # accumulate as duplicates. Wipe and rebuild for the target slate.
+    if game_id is None:
+        try:
+            client.table("edges").delete().in_("game_id", target_ids).execute()
+        except Exception as e:
+            print(f"[edge] cleanup warn: {e}")
+
     odds_resp = (
-        get_client()
+        client
         .table("odds")
         .select("*")
         .in_("game_id", target_ids)
@@ -602,8 +615,36 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
                     "created_at":        now,
                 })
 
+    # ── Empirical calibration ────────────────────────────────────────────────
+    try:
+        cal_lookup = load_calibration_lookup(min_n=8)
+        if cal_lookup and edges:
+            adj = 0
+            for e in edges:
+                raw = e.get("model_prob")
+                if raw is None: continue
+                cal = calibrate_prob(float(raw), e.get("market", ""), cal_lookup)
+                if cal != raw:
+                    e["model_prob_raw"] = round(float(raw), 4)
+                    e["model_prob"] = cal
+                    novig = e.get("market_prob_novig") or 0
+                    e["edge"] = round(cal - float(novig), 4)
+                    adj += 1
+            if adj:
+                print(f"[edge] calibration applied to {adj} legs ({len(cal_lookup)} buckets)")
+    except Exception as cal_err:
+        print(f"[edge] calibration skipped: {cal_err}")
+
     if edges:
         upsert("edges", edges, on_conflict="id")
+
+    # Shadow-log for grading + future calibration
+    try:
+        n_logged = shadow_log_edges(edges)
+        if n_logged:
+            print(f"[edge] shadow-logged {n_logged} picks")
+    except Exception as log_err:
+        print(f"[edge] shadow-log skipped: {log_err}")
 
     strong = sum(1 for e in edges if e["edge"] >= EDGE_STRONG_THRESHOLD)
     soft   = sum(1 for e in edges if EDGE_SOFT_THRESHOLD <= e["edge"] < EDGE_STRONG_THRESHOLD)
