@@ -41,10 +41,24 @@ def shadow_log_edges(edges: list[dict], sync_date: Optional[date] = None) -> int
             sid = notes.split("shadow_id=", 1)[1].split()[0]
             existing_ids.add(sid)
 
+    # Pull each edge's actual game_date so we tag the shadow bet with the
+    # game's own date, not the sync date. Without this, picks for future
+    # playoff games (5/5, 5/6 etc) show up under sync_date and grading can
+    # never resolve them.
+    client = get_client()
+    game_ids = list({e.get("game_id") for e in edges if e.get("game_id")})
+    if game_ids:
+        gd_resp = (client.table("games").select("id, game_date")
+                   .in_("id", game_ids).execute())
+        game_date_map = {r["id"]: r["game_date"] for r in (gd_resp.data or [])}
+    else:
+        game_date_map = {}
+
     rows = []
     for e in edges:
+        actual_game_date = game_date_map.get(e.get("game_id"), sd_str)
         sid = _shadow_id(e.get("game_id", ""), e.get("market", ""),
-                         e.get("outcome", ""), sd_str)
+                         e.get("outcome", ""), actual_game_date)
         if sid in existing_ids:
             continue
         meta = {
@@ -56,7 +70,7 @@ def shadow_log_edges(edges: list[dict], sync_date: Optional[date] = None) -> int
         notes = f"{SHADOW_MARKER} shadow_id={sid} meta={json.dumps(meta)}"
         rows.append({
             "game_id":     e.get("game_id"),
-            "game_date":   sd_str,
+            "game_date":   actual_game_date,
             "market":      e.get("market"),
             "outcome":     e.get("outcome"),
             "book":        e.get("best_book"),

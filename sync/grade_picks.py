@@ -87,20 +87,28 @@ def _final_score(game_id: str, game_date: str) -> Optional[dict]:
 
 def _settle(market: str, outcome: str, score: dict) -> Optional[str]:
     """Determine win/loss/push given market, outcome string, and final score."""
-    home_team = score.get("home_team", "")
-    away_team = score.get("away_team", "")
+    home_team = (score.get("home_team") or "").lower()
+    away_team = (score.get("away_team") or "").lower()
+    home_abbr = (score.get("home_abbr") or "").upper()
+    away_abbr = (score.get("away_abbr") or "").upper()
     home, away = score["home_score"], score["away_score"]
     total = home + away
+    out_l = outcome.lower()
 
     if market == "h2h":
-        # outcome is the team name that the bet is on
-        is_home_pick = (outcome.lower() == home_team.lower())
-        is_away_pick = (outcome.lower() == away_team.lower())
-        if not (is_home_pick or is_away_pick):
+        # Match by commonName, abbrev, or substring (handles "Tampa Bay Lightning",
+        # "Lightning", "TBL" all pointing to the same team).
+        is_home = (out_l == home_team or home_team in out_l or home_abbr.lower() in out_l.split())
+        is_away = (out_l == away_team or away_team in out_l or away_abbr.lower() in out_l.split())
+        # Final fallback: explicit substring contains
+        if not (is_home or is_away):
+            is_home = home_team in out_l or home_abbr.lower() in out_l
+            is_away = away_team in out_l or away_abbr.lower() in out_l
+        if not (is_home or is_away):
             return None
-        if home == away:                              # NHL doesn't tie in regulation but OT/SO resolve it
+        if home == away:
             return None
-        if is_home_pick:
+        if is_home:
             return "win" if home > away else "loss"
         return "win" if away > home else "loss"
 
