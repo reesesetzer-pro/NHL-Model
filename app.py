@@ -428,6 +428,7 @@ with tabs[0]:
     odds_df    = safe_fetch("odds")
     goalies_df = safe_fetch("goalies")
     edges_df   = safe_fetch("edges")
+    props_df   = safe_fetch("props")
     rlm_df     = safe_fetch("rlm_signals")
     inj_df     = safe_fetch("injuries")
 
@@ -448,13 +449,18 @@ with tabs[0]:
         """, unsafe_allow_html=True)
     else:
         # Filter controls
-        fcol1, fcol2, fcol3 = st.columns([2, 2, 2])
+        fcol1, fcol2, fcol3, fcol4, fcol5 = st.columns([1.4, 1.2, 1.6, 1.4, 1.4])
         with fcol1:
             show_edges_only = st.toggle("Edges Only (≥4%)", value=False)
         with fcol2:
             show_rlm_only = st.toggle("RLM Only", value=False)
         with fcol3:
             market_filter = st.selectbox("Market", ["All", "Moneyline", "Puck Line", "Total", "Team Total"])
+        with fcol4:
+            prop_sort_by = st.radio("Player props sort", ["Edge", "Win %"], horizontal=True, key="nhl_prop_sort")
+        with fcol5:
+            prop_min_price = st.slider("Min price", -1000, 200, -550, 10, key="nhl_prop_min_price",
+                                       help="Cap how juiced player-prop legs can be")
 
         for _, game in games_df.iterrows():
             gid       = game["id"]
@@ -597,6 +603,56 @@ with tabs[0]:
                                   <div class="goalie-stat" style="margin-top:6px;">Last 5 SV%: {sv_str}</div>
                                 </div>
                                 """, unsafe_allow_html=True)
+
+                # ── Top 3 player props for THIS game ──────────────────────
+                game_props = props_df[props_df["game_id"] == gid] if not props_df.empty else pd.DataFrame()
+                if not game_props.empty:
+                    qualifying = game_props[
+                        (pd.to_numeric(game_props["edge"], errors="coerce") >= 0.04)
+                        & (pd.to_numeric(game_props["price"], errors="coerce") >= prop_min_price)
+                        & (~game_props["suppressed"].fillna(False))
+                    ].copy()
+                    if not qualifying.empty:
+                        sort_col = "edge" if prop_sort_by == "Edge" else "model_prob"
+                        qualifying = qualifying.sort_values(sort_col, ascending=False).head(3)
+                        st.markdown("<div style='margin:8px 0 4px 0;font-size:11px;color:#666688;letter-spacing:1px;text-transform:uppercase;font-family:Space Mono,monospace;'>"
+                                    f"Top 3 Player Props · sorted by {prop_sort_by.lower()}"
+                                    "</div>", unsafe_allow_html=True)
+                        for _, pr in qualifying.iterrows():
+                            edge_v = float(pr.get("edge") or 0)
+                            mp     = float(pr.get("model_prob") or 0)
+                            price  = int(pr.get("price") or 0)
+                            book   = str(pr.get("book") or "").replace("_bet","").replace("hardrockbet","hardrock")
+                            mkt    = str(pr.get("market") or "").replace("player_","").replace("_"," ")
+                            line   = pr.get("point", "")
+                            ou     = "Over" if "Over" in str(pr.get("outcome","")) else "Under"
+                            edge_color = "#00FF88" if edge_v >= 0.07 else ("#FFD700" if edge_v >= 0.04 else "#888")
+                            price_str = f"+{price}" if price > 0 else str(price)
+                            st.markdown(f"""
+                            <div style="background:#0D0D18;border:1px solid #1E1E30;border-left:3px solid {edge_color};
+                                        border-radius:8px;padding:10px 14px;margin:6px 0;
+                                        display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+                              <div style="flex:1;min-width:240px;">
+                                <div style="font-size:13px;font-weight:700;color:#E2E2EE;">{pr.get('player_name','?')}</div>
+                                <div style="font-size:11px;color:#B8B8D4;margin-top:2px;">{ou} <strong>{line}</strong> {mkt.title()}</div>
+                              </div>
+                              <div style="display:flex;gap:18px;font-family:Space Mono,monospace;">
+                                <div style="text-align:center;">
+                                  <div style="font-size:9px;color:#444466;">EDGE</div>
+                                  <div style="font-size:13px;font-weight:700;color:{edge_color};">{edge_v*100:+.1f}%</div>
+                                </div>
+                                <div style="text-align:center;">
+                                  <div style="font-size:9px;color:#444466;">WIN %</div>
+                                  <div style="font-size:13px;font-weight:700;color:#00D4FF;">{mp*100:.1f}%</div>
+                                </div>
+                                <div style="text-align:center;">
+                                  <div style="font-size:9px;color:#444466;">PRICE</div>
+                                  <div style="font-size:13px;color:#E2E2EE;">{price_str}</div>
+                                  <div style="font-size:9px;color:#666688;">{book}</div>
+                                </div>
+                              </div>
+                            </div>
+                            """, unsafe_allow_html=True)
 
                 st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
 
