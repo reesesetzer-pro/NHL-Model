@@ -415,8 +415,12 @@ def calculate_all_prop_edges() -> list[dict]:
             if player_name.lower() in injured_names:
                 continue
 
-            # Lineup context
-            model_prob = no_vig_over
+            # Lineup context — accumulate adjustments as a delta on top of
+            # the no-vig market probability, then cap the total swing. Mirrors
+            # NBA's AdjustmentBreakdown.combined cap rationale: PP1 + line +
+            # goalie SV% + opp xGA can stack to ±0.15, putting the model in
+            # cliff territory with no realized validation. Cap at ±10pp.
+            adjustment = 0.0
             team_abbr  = ""
             lr         = lineup_index.get(player_name.lower())
             if lr is not None:
@@ -425,9 +429,9 @@ def calculate_all_prop_edges() -> list[dict]:
                 pp_unit   = lr.get("pp_unit")
 
                 if pp_unit == 1 and market in _SCORING_PROPS:
-                    model_prob += 0.03
+                    adjustment += 0.03
                 if line_num == 1:
-                    model_prob += 0.02
+                    adjustment += 0.02
 
             # Opponent goalie + defense adjustment for scoring/shot props.
             # When a player's team is known, look up the OPPONENT's starter SV%
@@ -442,12 +446,12 @@ def calculate_all_prop_edges() -> list[dict]:
                     opp_sv = team_goalie_sv.get(opp_abbr)
                     if opp_sv is not None:
                         sv_delta = opp_sv - league_sv
-                        model_prob += -3.0 * sv_delta  # 0.020 above avg → -6pp; 0.020 below → +6pp
+                        adjustment += -3.0 * sv_delta  # 0.020 above avg → -6pp; 0.020 below → +6pp
                     # Team xGA bump: each 0.20 xGA/60 above league avg → +2pp scoring
                     opp_xga = team_xga.get(opp_abbr)
                     if opp_xga is not None:
                         xga_delta = opp_xga - league_xga
-                        model_prob += (xga_delta / 0.20) * 0.02
+                        adjustment += (xga_delta / 0.20) * 0.02
             elif team_abbr and market == "player_total_saves":
                 gt = game_teams.get(game_id, {})
                 opp_abbr = gt.get("away_abbr") if team_abbr == gt.get("home_abbr") else gt.get("home_abbr")
@@ -458,9 +462,13 @@ def calculate_all_prop_edges() -> list[dict]:
                                     and r.get("season_type")=="regular" and r.get("xgf_per60") is not None), None)
                     if opp_xgf is not None:
                         league_xgf = league_xga  # symmetric assumption
-                        model_prob += ((opp_xgf - league_xgf) / 0.20) * 0.02
+                        adjustment += ((opp_xgf - league_xgf) / 0.20) * 0.02
 
-            # Clamp
+            # Cap cumulative adjustment to ±10pp before applying to no-vig
+            adjustment = max(-0.10, min(0.10, adjustment))
+            model_prob = no_vig_over + adjustment
+
+            # Final clamp
             model_prob = min(max(model_prob, 0.01), 0.99)
             edge = model_prob - no_vig_over
 
