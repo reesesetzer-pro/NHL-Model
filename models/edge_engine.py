@@ -231,8 +231,13 @@ def get_situational_modifier(game_id: str, outcome: str, market: str = "h2h") ->
 
             # Totals: no shootout in playoffs → under has less "easy goal" bail-out
             # Playoff games that go to OT produce goals; tight games no longer end 1-0 in SO
-            if is_total_market and is_over_outcome:
-                modifier += PLAYOFF_TOTALS_OVER_BOOST
+            # Apply symmetrically so over+under model_probs sum to ~1; otherwise the
+            # over-only boost creates a structural over bias on every playoff total.
+            if is_total_market:
+                if is_over_outcome:
+                    modifier += PLAYOFF_TOTALS_OVER_BOOST
+                else:
+                    modifier -= PLAYOFF_TOTALS_OVER_BOOST
 
     except Exception as e:
         print(f"[edge] Situational modifier error: {e}")
@@ -395,8 +400,9 @@ def calculate_all_prop_edges() -> list[dict]:
             opp_imp = float(np.mean(under_imps))
             if our_imp <= 0 or opp_imp <= 0:
                 continue
-            no_vig_over, _ = remove_vig(our_imp, opp_imp)
-            if no_vig_over is None or no_vig_over <= 0:
+            no_vig_over, no_vig_under = remove_vig(our_imp, opp_imp)
+            if (no_vig_over is None or no_vig_over <= 0
+                    or no_vig_under is None or no_vig_under <= 0):
                 continue
 
             # Best available price for the bettor at this specific line
@@ -478,14 +484,46 @@ def calculate_all_prop_edges() -> list[dict]:
                 "updated_at":         now,
             })
 
+            # Mirror Under row — model_prob is the complement of the calibrated
+            # over prob (so the +PP1/+line/-goalie/+xGA adjustments flip sign
+            # for the Under, as they should). Without this, the props table
+            # only ever contains Over rows and the model is structurally
+            # incapable of suggesting an Under pick.
+            best_u_idx   = grp_under["price"].idxmax()
+            best_u_price = int(grp_under.loc[best_u_idx, "price"])
+            best_u_book  = str(grp_under.loc[best_u_idx, "book"])
+            under_model_prob = min(max(1.0 - model_prob, 0.01), 0.99)
+            under_edge       = under_model_prob - no_vig_under
+            under_id         = _make_id(game_id, market, player_name, "Under", str(point_val), today_str)
+            results.append({
+                "id":                 under_id,
+                "game_id":            game_id,
+                "player_name":        player_name,
+                "team_abbr":          team_abbr,
+                "market":             market,
+                "outcome":            f"{player_name} Under",
+                "point":              float(point_val),
+                "book":               best_u_book,
+                "price":              best_u_price,
+                "model_prob":         round(under_model_prob, 4),
+                "market_prob_novig":  round(no_vig_under, 4),
+                "edge":               round(under_edge, 4),
+                "suppressed":         False,
+                "suppression_reason": None,
+                "updated_at":         now,
+            })
+
     if results:
         upsert("props", results, on_conflict="id")
 
     scored = [r for r in results if r["market"] in _SCORING_PROPS]
     shots  = [r for r in results if r["market"] == "player_shots_on_goal"]
     saves  = [r for r in results if r["market"] == "goalie_saves"]
+    overs  = [r for r in results if " Over"  in (r.get("outcome") or "")]
+    unders = [r for r in results if " Under" in (r.get("outcome") or "")]
     print(f"[edge] Props: {len(results)} total | "
-          f"{len(scored)} scoring | {len(shots)} shots | {len(saves)} saves")
+          f"{len(scored)} scoring | {len(shots)} shots | {len(saves)} saves | "
+          f"{len(overs)} Over / {len(unders)} Under")
     return results
 
 
