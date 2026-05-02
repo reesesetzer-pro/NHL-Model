@@ -85,7 +85,29 @@ def _final_score(game_id: str, game_date: str) -> Optional[dict]:
     return None
 
 
-def _settle(market: str, outcome: str, score: dict) -> Optional[str]:
+def _lookup_line(client, game_id: str, market: str, outcome: str) -> Optional[float]:
+    """Pull the betting line from the odds table for this (game, market, outcome).
+
+    Bets only store outcome (e.g. "Over" / "Pittsburgh Penguins") with no line
+    embedded, so to grade totals + spreads we look up the line from odds.
+    Median across books — actual lines are uniform within a market on a given
+    game so this just collapses cleanly when multiple books posted the same
+    line, and tolerates one-off outliers.
+    """
+    try:
+        rows = (client.table("odds").select("point")
+                .eq("game_id", game_id).eq("market", market).eq("outcome", outcome)
+                .execute().data) or []
+    except Exception:
+        return None
+    points = [float(r["point"]) for r in rows if r.get("point") is not None]
+    if not points:
+        return None
+    points.sort()
+    return points[len(points) // 2]  # median
+
+
+def _settle(market: str, outcome: str, score: dict, line: Optional[float] = None) -> Optional[str]:
     """Determine win/loss/push given market, outcome string, and final score."""
     home_team = (score.get("home_team") or "").lower()
     away_team = (score.get("away_team") or "").lower()
@@ -100,7 +122,6 @@ def _settle(market: str, outcome: str, score: dict) -> Optional[str]:
         # "Lightning", "TBL" all pointing to the same team).
         is_home = (out_l == home_team or home_team in out_l or home_abbr.lower() in out_l.split())
         is_away = (out_l == away_team or away_team in out_l or away_abbr.lower() in out_l.split())
-        # Final fallback: explicit substring contains
         if not (is_home or is_away):
             is_home = home_team in out_l or home_abbr.lower() in out_l
             is_away = away_team in out_l or away_abbr.lower() in out_l
@@ -113,17 +134,36 @@ def _settle(market: str, outcome: str, score: dict) -> Optional[str]:
         return "win" if away > home else "loss"
 
     if market == "spreads":
-        # outcome string typically "Team Name +1.5" or just "Team Name"
-        # Without the line stored separately on this row we can't grade reliably
-        # — skip until we capture line in shadow log
-        return None
+        # outcome is the team name (e.g. "Pittsburgh Penguins"). Line is stored
+        # on the odds row, looked up by the caller and passed in.
+        if line is None:
+            return None
+        is_home = (out_l == home_team or home_team in out_l or home_abbr.lower() in out_l)
+        is_away = (out_l == away_team or away_team in out_l or away_abbr.lower() in out_l)
+        if not (is_home or is_away):
+            return None
+        team_score, opp_score = (home, away) if is_home else (away, home)
+        margin = team_score - opp_score   # positive if team won outright
+        # Cover means: team_score + line > opp_score → margin + line > 0
+        # NHL puck lines are ±1.5 (no integer to push)
+        if margin + line > 0:
+            return "win"
+        if margin + line < 0:
+            return "loss"
+        return "push"
 
     if market == "totals":
-        # outcome is "Over X.Y" or "Under X.Y"
+        # outcome is "Over" or "Under" — line passed in by caller from odds table.
         m = re.search(r"(Over|Under)\s+(\d+\.?\d*)", outcome, re.I)
-        if not m:
-            return None
-        side, line = m.group(1).lower(), float(m.group(2))
+        if m:
+            side, embedded_line = m.group(1).lower(), float(m.group(2))
+            line = embedded_line  # prefer in-string when present
+        else:
+            if line is None:
+                return None
+            side = "over" if "over" in out_l else ("under" if "under" in out_l else None)
+            if side is None:
+                return None
         if total == line:
             return "push"
         if side == "over":
@@ -164,7 +204,13 @@ def run_grading(verbose: bool = True) -> dict:
         if not score:
             misses += 1
             continue
-        result = _settle(p.get("market", ""), p.get("outcome", ""), score)
+        market = p.get("market", "")
+        outcome = p.get("outcome", "")
+        # Look up line from odds table for spreads + totals (not in outcome string)
+        line = None
+        if market in ("totals", "spreads"):
+            line = _lookup_line(client, str(p["game_id"]), market, outcome)
+        result = _settle(market, outcome, score, line=line)
         if not result:
             misses += 1
             continue
