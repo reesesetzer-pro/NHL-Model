@@ -1,5 +1,5 @@
 import sys
-sys.path.insert(0, 'C:/NHL_Model')
+import os as _os; sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 
 from sync.odds_sync import run_props_sync
 from models.edge_engine import calculate_all_prop_edges

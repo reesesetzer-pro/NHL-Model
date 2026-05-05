@@ -35,6 +35,14 @@ HOME_FACTOR_PLAYOFF  = 1.075   # amplified but not double-counted with playoff m
 NHL_AVG_XGF_PER60    = 2.80
 NHL_AVG_XGA_PER60    = 2.80
 
+# Playoff totals shrinkage. Historical NHL playoff goals/game runs ~12-15%
+# below regular-season pace because top goalies, tighter defensive systems,
+# and lower-event chess-match games dominate. We don't have playoff-specific
+# team_stats (only ~5-15 games per team is too noisy anyway), so we apply
+# this as a multiplicative haircut to both lambdas — preserves the spread
+# (good guys vs. bad guys ratio is unchanged) while reducing total goals.
+PLAYOFF_LAMBDA_SHRINK = 0.13   # 13% reduction
+
 # OT home win rate
 OT_HOME_RATE_REGULAR = 0.52
 OT_HOME_RATE_PLAYOFF = 0.54
@@ -128,6 +136,12 @@ def expected_goals(home_abbr: str, away_abbr: str,
     # Lower xGA/60 = better defence → invert for defence rating
     lambda_home = (home_att / lg_att) * (away_def / lg_def) * lg_att * hf
     lambda_away = (away_att / lg_att) * (home_def / lg_def) * lg_att
+
+    # Playoff totals shrinkage — apply BEFORE clamping so the haircut sticks
+    # even when teams hit the upper bound.
+    if is_playoff:
+        lambda_home *= (1.0 - PLAYOFF_LAMBDA_SHRINK)
+        lambda_away *= (1.0 - PLAYOFF_LAMBDA_SHRINK)
 
     # Clamp to realistic NHL range
     lambda_home = max(0.8, min(lambda_home, 6.5))

@@ -407,6 +407,7 @@ render_status_bar()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tabs = st.tabs([
+    "🎯 MUST TAKE",
     "🏒 Today's Games",
     "⭐ Best Bets",
     "🔄 RLM Feed",
@@ -421,9 +422,145 @@ tabs = st.tabs([
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — TODAY'S GAMES
+# TAB 0 — MUST TAKE — high-conviction tiered picks
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[0]:
+    st.markdown("## 🎯 Must Take")
+    st.caption("Tiered NHL picks by win-prob conviction. Proven markets only "
+               "(spreads + h2h — the model's +33% / +39% ROI markets per "
+               "settled-pick history). Totals included only when edge is large "
+               "since the model is breakeven on them historically.")
+
+    edges_df = safe_fetch("edges")
+    games_df_local = safe_fetch("games")
+
+    # Filter to today + future game edges
+    from datetime import date as _d, timedelta as _td
+    today = _d.today().isoformat()
+    upcoming_ids = []
+    if not games_df_local.empty and "game_date" in games_df_local.columns:
+        upcoming_ids = games_df_local[games_df_local["game_date"] >= today]["id"].tolist()
+
+    if edges_df.empty or not upcoming_ids:
+        st.info("No upcoming edges yet — run odds_sync + edge_engine first.")
+    else:
+        df = edges_df[edges_df["game_id"].isin(upcoming_ids)].copy()
+
+        # Filter rules:
+        # - spreads/h2h: edge ≥ 4% (proven markets)
+        # - totals:     edge ≥ 7% (model is breakeven; need bigger margin)
+        # - props:      excluded (separate tab)
+        df["model_prob"] = df["model_prob"].astype(float)
+        df["edge"]       = df["edge"].astype(float)
+
+        proven   = df[df["market"].isin(["spreads", "h2h"]) & (df["edge"] >= 0.04)]
+        totals   = df[(df["market"] == "totals") & (df["edge"] >= 0.07)]
+        candidates = pd.concat([proven, totals], ignore_index=True)
+
+        # Game-level dedupe — keep highest-edge pick per (game_id, market) pair
+        candidates = candidates.sort_values("edge", ascending=False)
+        candidates = candidates.drop_duplicates(subset=["game_id", "market"], keep="first")
+
+        if candidates.empty:
+            st.warning(
+                "⚠️ Zero NHL picks meet Must-Take filters tonight. **Sit it out** — "
+                "no proven-market plays clearing thresholds. Other tabs have softer "
+                "opportunities at your own risk."
+            )
+        else:
+            # Tier by model_prob (NHL is tighter than NBA — different breakpoints)
+            tiers = [
+                ("🟢", "LOCKS",  "≥ 60% win prob — strongest signals",  0.60, 1.01,  "#00FF88"),
+                ("🟡", "STRONG", "53–60% — solid plays",                0.53, 0.60,  "#FFD700"),
+                ("🔴", "EDGE",   "Pure edge plays under 53%",           0.00, 0.53,  "#FF6B35"),
+            ]
+
+            # Helper for game label from games_df_local
+            game_lookup = {}
+            for _, g in games_df_local.iterrows():
+                game_lookup[g["id"]] = f"{g.get('away_team','?')} @ {g.get('home_team','?')}"
+
+            def _book_short(b):
+                return {"draftkings": "DK", "fanduel": "FD", "betmgm": "MGM",
+                        "fanatics": "FT", "hardrockbet": "HR", "williamhill_us": "CZR",
+                        "espnbet": "SCR"}.get(b or "", b or "")
+
+            def _odds_str(p):
+                try: p = int(float(p))
+                except: return "—"
+                return f"+{p}" if p > 0 else str(p)
+
+            for emoji, tier_name, tier_sub, lo, hi, accent in tiers:
+                tier_picks = candidates[(candidates["model_prob"] >= lo) & (candidates["model_prob"] < hi)]
+                if tier_picks.empty:
+                    continue
+
+                avg_win  = tier_picks["model_prob"].mean() * 100
+                avg_edge = tier_picks["edge"].mean() * 100
+                kelly_q  = tier_picks["kelly_quarter"].astype(float).sum()
+
+                # Build bullets — outcome + price + model%/edge%
+                bullets_html = ""
+                for _, p in tier_picks.iterrows():
+                    game_lbl = game_lookup.get(p["game_id"], "")
+                    bullets_html += (
+                        f'<div style="font-size:14px;color:#E2E2EE;margin:8px 0;line-height:1.5">'
+                        f'• <strong>{p["outcome"]}</strong> '
+                        f'<span style="color:#888;font-size:12px">— {p["market"]}</span> '
+                        f'<span style="color:#888">@ {_odds_str(p["best_price"])} '
+                        f'({_book_short(p["best_book"])})</span> &nbsp;'
+                        f'<span style="color:#00D4FF;font-size:12px;font-weight:600">'
+                        f'{p["model_prob"]*100:.1f}%</span> '
+                        f'<span style="color:#00FF88;font-size:12px;font-weight:600">'
+                        f'+{p["edge"]*100:.1f}%</span><br>'
+                        f'<span style="color:#666;font-size:11px;margin-left:14px">{game_lbl}</span>'
+                        f'</div>'
+                    )
+
+                st.markdown(f"""
+                <div style="background:#0D1B2E;border:1px solid #1E2E45;border-radius:12px;
+                            border-left:3px solid {accent};padding:18px 22px;margin-bottom:14px">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:10px">
+                    <div style="flex:1;min-width:280px">
+                      <div style="font-size:16px;font-weight:800;color:{accent}">
+                        {emoji} {tier_name}
+                      </div>
+                      <div style="font-size:12px;color:#7A95B5;margin-top:2px">{tier_sub}</div>
+                    </div>
+                    <div style="display:flex;gap:24px;flex-wrap:wrap">
+                      <div style="text-align:center">
+                        <div style="font-size:10px;color:#5A8AB4;text-transform:uppercase;letter-spacing:0.06em">PICKS</div>
+                        <div style="font-size:16px;font-weight:700;color:#E2E2EE">{len(tier_picks)}</div>
+                      </div>
+                      <div style="text-align:center">
+                        <div style="font-size:10px;color:#5A8AB4;text-transform:uppercase;letter-spacing:0.06em">AVG WIN %</div>
+                        <div style="font-size:16px;font-weight:700;color:#00D4FF">{avg_win:.1f}%</div>
+                      </div>
+                      <div style="text-align:center">
+                        <div style="font-size:10px;color:#5A8AB4;text-transform:uppercase;letter-spacing:0.06em">AVG EDGE</div>
+                        <div style="font-size:16px;font-weight:700;color:#00FF88">+{avg_edge:.1f}%</div>
+                      </div>
+                      <div style="text-align:center">
+                        <div style="font-size:10px;color:#5A8AB4;text-transform:uppercase;letter-spacing:0.06em">¼K TOTAL</div>
+                        <div style="font-size:16px;font-weight:700;color:#00FF88">${kelly_q:.0f}</div>
+                      </div>
+                    </div>
+                  </div>
+                  {bullets_html}
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.caption(
+                f"💡 Filters: spreads/h2h edge ≥4% · totals edge ≥7% · ≤1 pick per game/market. "
+                f"Spreads markets historically delivered +33% ROI; h2h +39%; totals breakeven. "
+                f"Sizing reflects ¼-Kelly already."
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 1 — TODAY'S GAMES
+# ─────────────────────────────────────────────────────────────────────────────
+with tabs[1]:
     games_df   = safe_fetch("games")
     odds_df    = safe_fetch("odds")
     goalies_df = safe_fetch("goalies")
@@ -660,7 +797,7 @@ with tabs[0]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — BEST BETS
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[1]:
+with tabs[2]:
     edges_df = safe_fetch("edges")
     games_df = safe_fetch("games")
     props_df = safe_fetch("props", limit=1000)
@@ -682,7 +819,7 @@ with tabs[1]:
             with st.spinner("Running edge engine..."):
                 try:
                     import sys
-                    sys.path.insert(0, "C:/NHL_Model")
+                    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                     from models.edge_engine import calculate_all_edges
                     calculate_all_edges()
                     st.rerun()
@@ -869,7 +1006,7 @@ with tabs[1]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 3 — RLM FEED
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[2]:
+with tabs[3]:
     rlm_df  = safe_fetch("rlm_signals")
     games_df = safe_fetch("games")
 
@@ -966,7 +1103,7 @@ with tabs[2]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 4 — LINE MOVEMENT
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[3]:
+with tabs[4]:
     st.markdown("""
     <div style="font-size:18px; font-weight:700; margin-bottom:16px;">📈 Line Movement</div>
     """, unsafe_allow_html=True)
@@ -1043,7 +1180,7 @@ with tabs[3]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 5 — PROPS FINDER
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[4]:
+with tabs[5]:
     st.markdown("""
     <div style="font-size:18px; font-weight:700; margin-bottom:16px;">🎯 Props Finder</div>
     """, unsafe_allow_html=True)
@@ -1055,7 +1192,7 @@ with tabs[4]:
             with st.spinner("Fetching prop odds..."):
                 try:
                     import sys as _sys
-                    _sys.path.insert(0, "C:/NHL_Model")
+                    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                     from sync.odds_sync import run_props_sync as _rps
                     _rps()
                     st.rerun()
@@ -1066,7 +1203,7 @@ with tabs[4]:
             with st.spinner("Calculating prop edges..."):
                 try:
                     import sys as _sys
-                    _sys.path.insert(0, "C:/NHL_Model")
+                    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                     from models.edge_engine import calculate_all_prop_edges as _cape
                     _cape()
                     st.rerun()
@@ -1336,7 +1473,7 @@ with tabs[4]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 6 — PLAYER INTEL
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[5]:
+with tabs[6]:
     st.markdown("""
     <div style="font-size:18px; font-weight:700; margin-bottom:16px;">👤 Player Intel</div>
     """, unsafe_allow_html=True)
@@ -1406,7 +1543,7 @@ with tabs[5]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 7 — GOALIE BOARD
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[6]:
+with tabs[7]:
     st.markdown("""
     <div style="font-size:18px; font-weight:700; margin-bottom:16px;">🥅 Goalie Board</div>
     """, unsafe_allow_html=True)
@@ -1483,7 +1620,7 @@ with tabs[6]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 8 — MODEL TRACKER
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[7]:
+with tabs[8]:
     st.markdown("""
     <div style="font-size:18px; font-weight:700; margin-bottom:16px;">📊 Model Tracker</div>
     """, unsafe_allow_html=True)
@@ -1554,7 +1691,7 @@ with tabs[7]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 9 — BET JOURNAL + GRADE PICKS
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[8]:
+with tabs[9]:
     st.markdown("""
     <div style="font-size:18px; font-weight:700; margin-bottom:4px;">📓 Bet Journal</div>
     <div style="font-size:12px; color:#444466; font-family:'Space Mono',monospace; margin-bottom:20px;">
@@ -1752,7 +1889,7 @@ with tabs[8]:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 10 — PLAYOFF BRACKET
 # ─────────────────────────────────────────────────────────────────────────────
-with tabs[9]:
+with tabs[10]:
     st.markdown("""
     <div style="margin-bottom:20px;">
         <div style="font-size:18px; font-weight:700; margin-bottom:4px;">🏆 Playoff Bracket</div>
@@ -1780,7 +1917,7 @@ with tabs[9]:
             with st.spinner("Syncing playoff bracket..."):
                 try:
                     import sys
-                    sys.path.insert(0, "C:/NHL_Model")
+                    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                     from sync.series_sync import run_series_sync
                     run_series_sync()
                     st.rerun()

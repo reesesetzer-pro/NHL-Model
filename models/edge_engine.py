@@ -85,7 +85,15 @@ def get_series_context(home_abbr: str, away_abbr: str) -> dict:
 
 
 def is_playoff_game(game_id: str) -> bool:
-    """Check if a game is a playoff game (gameType == 3 in NHL API)."""
+    """Check if a game is a playoff game.
+
+    Primary signal: game_type == "3" (NHL API convention; backfilled by
+    series_sync). Fallback: any game whose date is in the playoff window
+    (Apr 15 – Jun 30) is treated as playoff regardless of tag — series_sync
+    races the daily edge_engine run and sometimes hasn't tagged today's
+    games yet, leaving them at the default "2" (regular season) and pulling
+    the model into regular-season totals territory.
+    """
     try:
         games_df = fetch("games")
         if games_df.empty:
@@ -93,7 +101,19 @@ def is_playoff_game(game_id: str) -> bool:
         row = games_df[games_df["id"] == game_id]
         if row.empty:
             return False
-        return str(row.iloc[0].get("game_type", "")) == "3"
+        r = row.iloc[0]
+        if str(r.get("game_type", "")) == "3":
+            return True
+        # Date fallback
+        gd = str(r.get("game_date", ""))
+        if len(gd) >= 7:
+            try:
+                m = int(gd[5:7]); d = int(gd[8:10])
+                if (m == 4 and d >= 15) or m in (5, 6):
+                    return True
+            except ValueError:
+                pass
+        return False
     except Exception:
         return False
 
@@ -102,9 +122,16 @@ def is_playoff_game(game_id: str) -> bool:
 
 def best_no_vig_prob(game_id: str, market: str, outcome: str) -> Optional[float]:
     """
-    Calculate no-vig implied probability using the best available line
-    across all books, then remove vig.
+    No-vig market consensus: average implied probabilities (NOT American odds)
+    across books per side, then 2-way devig. Author already fixed this same
+    bug in `calculate_all_prop_edges`; backporting here.
+
+    Avoids the original bug of mixing best-of-our-side with mean-of-opp-side
+    (asymmetric → structural bias toward phantom edges) and of averaging
+    American odds directly (mean([+100, -105])=−2.5 → garbage implied).
     """
+    import numpy as np
+
     df = fetch("odds", filters={"game_id": game_id})
     if df.empty:
         return None
@@ -117,24 +144,25 @@ def best_no_vig_prob(game_id: str, market: str, outcome: str) -> Optional[float]
     if len(outcomes) < 2:
         return None
 
-    # Get best price for our outcome
-    our_df  = market_df[market_df["outcome"] == outcome]
+    our_df = market_df[market_df["outcome"] == outcome]
     opp_outcome = [o for o in outcomes if o != outcome]
-    if not opp_outcome:
+    if not opp_outcome or our_df.empty:
         return None
-    opp_df  = market_df[market_df["outcome"] == opp_outcome[0]]
-
-    if our_df.empty or opp_df.empty:
+    opp_df = market_df[market_df["outcome"] == opp_outcome[0]]
+    if opp_df.empty:
         return None
 
-    best_our = our_df["price"].max()
-    # For opponent use worst case (consensus)
-    opp_price = opp_df["price"].mean()
+    our_imps = [american_to_implied(int(p)) for p in our_df["price"] if p != 0]
+    opp_imps = [american_to_implied(int(p)) for p in opp_df["price"] if p != 0]
+    if not our_imps or not opp_imps:
+        return None
 
-    our_imp = american_to_implied(int(best_our))
-    opp_imp = american_to_implied(int(opp_price))
+    our_avg = float(np.mean(our_imps))
+    opp_avg = float(np.mean(opp_imps))
+    if our_avg <= 0 or opp_avg <= 0:
+        return None
 
-    no_vig_our, _ = remove_vig(our_imp, opp_imp)
+    no_vig_our, _ = remove_vig(our_avg, opp_avg)
     return no_vig_our
 
 
@@ -671,7 +699,10 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
                 if raw is None: continue
                 cal = calibrate_prob(float(raw), e.get("market", ""), cal_lookup)
                 if cal != raw:
-                    e["model_prob_raw"] = round(float(raw), 4)
+                    # Don't persist raw — `edges` schema has no model_prob_raw
+                    # column. Calibrated value replaces raw in-place; raw is
+                    # recoverable via the in-memory calibration lookup if
+                    # needed for audit.
                     e["model_prob"] = cal
                     novig = e.get("market_prob_novig") or 0
                     e["edge"] = round(cal - float(novig), 4)
