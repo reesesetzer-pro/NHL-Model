@@ -27,8 +27,20 @@ def insert(table: str, rows: List[Dict]) -> None:
     get_client().table(table).insert(rows).execute()
 
 
-def fetch(table: str, filters: Optional[Dict] = None, limit: int = 500) -> pd.DataFrame:
-    q = get_client().table(table).select("*").limit(limit)
+def fetch(table: str, filters: Optional[Dict] = None, limit: int = 500,
+          order_by: Optional[tuple] = None) -> pd.DataFrame:
+    """Fetch rows from a table.
+
+    `order_by` is `(column, "asc"|"desc")`. Without it, Supabase returns rows in
+    insertion order, which means the first `limit` rows are the OLDEST — fine
+    for static tables like `games`, but wrong for time-series tables like
+    `edges` / `props` / `odds_history` where today's data sits at the END.
+    """
+    q = get_client().table(table).select("*")
+    if order_by:
+        col, direction = order_by
+        q = q.order(col, desc=(direction == "desc"))
+    q = q.limit(limit)
     if filters:
         for col, val in filters.items():
             q = q.eq(col, val)

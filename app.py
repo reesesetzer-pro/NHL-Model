@@ -224,7 +224,21 @@ html, body, [data-testid="stAppViewContainer"] {
 def safe_fetch(table, filters=None, limit=500):
     try:
         from utils.db import fetch
-        return fetch(table, filters, limit)
+        # Time-series tables: newest-first so today's rows fit inside `limit`.
+        # Without this, fetch() returns the OLDEST `limit` rows (Supabase's
+        # default insertion order), which on a busy table means tonight's
+        # edges never make it into the dataframe. Each table has a different
+        # timestamp column — see schema in utils/db.py.
+        time_series_col = {
+            "edges":        "created_at",
+            "props":        "updated_at",
+            "odds":         "updated_at",
+            "odds_history": "recorded_at",
+            "rlm_signals":  "detected_at",
+            "bets":         "created_at",
+        }
+        order_by = (time_series_col[table], "desc") if table in time_series_col else None
+        return fetch(table, filters, limit, order_by=order_by)
     except Exception:
         return pd.DataFrame()
 
