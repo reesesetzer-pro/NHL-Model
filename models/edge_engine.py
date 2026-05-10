@@ -28,6 +28,70 @@ from models.kelly import kelly_criterion
 from models.win_probability import model_probability
 
 
+_MAX_PLAUSIBLE_EDGE = 0.18  # 18pp — anything bigger is almost always a model bug
+_PAIRED_SUM_TOLERANCE = 0.05  # |sum - 1.0| above this triggers renormalize
+
+
+def _sanity_filter(edges: list[dict]) -> list[dict]:
+    """Defensive filter applied right before edges are written to the DB.
+
+    1. For paired markets (totals over/under, spreads home/away, h2h home/away):
+       if the two sides' model_probs don't sum to 1.0 ± 0.05, scale them so
+       they do. This catches the per-side-calibration bug where the two halves
+       drift independently.
+    2. Suppress any edge whose absolute value exceeds _MAX_PLAUSIBLE_EDGE.
+       Real bettable NHL edges live in the 1-15pp range; +30/+40pp signals are
+       always model overshoot, never reality.
+    """
+    if not edges:
+        return edges
+
+    # Group by (game_id, market) so we can renormalize paired markets together
+    by_pair: dict[tuple[str, str], list[dict]] = {}
+    for e in edges:
+        key = (e.get("game_id"), e.get("market"))
+        by_pair.setdefault(key, []).append(e)
+
+    renorm_count = 0
+    for (gid, market), group in by_pair.items():
+        # Only renormalize 2-sided markets (totals / spreads / h2h)
+        if market not in ("totals", "spreads", "h2h") or len(group) != 2:
+            continue
+        try:
+            probs = [float(g.get("model_prob") or 0) for g in group]
+        except Exception:
+            continue
+        s = probs[0] + probs[1]
+        if s <= 0:
+            continue
+        if abs(s - 1.0) > _PAIRED_SUM_TOLERANCE:
+            for g, p in zip(group, probs):
+                new_prob = round(p / s, 4)
+                novig = float(g.get("market_prob_novig") or 0)
+                g["model_prob"] = new_prob
+                g["edge"] = round(new_prob - novig, 4)
+            renorm_count += 1
+
+    if renorm_count:
+        print(f"[edge] sanity: renormalized {renorm_count} paired markets (sum != 1.0)")
+
+    # Suppress implausible edges
+    kept = []
+    suppressed = 0
+    for e in edges:
+        try:
+            edge_val = abs(float(e.get("edge") or 0))
+        except Exception:
+            edge_val = 0
+        if edge_val > _MAX_PLAUSIBLE_EDGE:
+            suppressed += 1
+            continue
+        kept.append(e)
+    if suppressed:
+        print(f"[edge] sanity: suppressed {suppressed} edges above {_MAX_PLAUSIBLE_EDGE*100:.0f}pp (model overshoot)")
+    return kept
+
+
 def _make_id(*parts) -> str:
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
 
@@ -711,6 +775,18 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
                 print(f"[edge] calibration applied to {adj} legs ({len(cal_lookup)} buckets)")
     except Exception as cal_err:
         print(f"[edge] calibration skipped: {cal_err}")
+
+    # ── Sanity filter ────────────────────────────────────────────────────────
+    # Two failure modes the unconstrained xG-Poisson + per-side calibration
+    # can produce:
+    #   1. Paired sides (over/under, home/away) end up with model_probs that
+    #      don't sum to 1.0 — sometimes by a wide margin (e.g. Over 64%, Under
+    #      64% sums to 128%). This is a normalization break.
+    #   2. Single-side edges blow past any plausible calibration window
+    #      (e.g. spreads at +39pp). The model has zero training data at those
+    #      bucket extremes, so the prob is almost certainly wrong.
+    # We renormalize paired markets and suppress wild outliers.
+    edges = _sanity_filter(edges)
 
     if edges:
         upsert("edges", edges, on_conflict="id")
