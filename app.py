@@ -441,9 +441,87 @@ tabs = st.tabs([
 with tabs[0]:
     st.markdown("## 🎯 Must Take")
     st.caption("Tiered NHL picks by win-prob conviction. Proven markets only "
-               "(spreads + h2h — the model's +33% / +39% ROI markets per "
-               "settled-pick history). Totals included only when edge is large "
-               "since the model is breakeven on them historically.")
+               "(spreads + h2h). Totals included only when edge is large since "
+               "the model is breakeven on them historically.")
+
+    # ── Live track-record banner ──────────────────────────────────────────────
+    # Pulls lifetime W-L + ROI from settled shadow picks. Updates after every
+    # grade run so the user sees the current evidence backing each market.
+    @st.cache_data(ttl=300)
+    def _market_track_record():
+        try:
+            from models.auto_log_picks import fetch_shadow_picks
+            settled = fetch_shadow_picks(only_pending=False, settled_only=True)
+            if settled is None or settled.empty:
+                return {}
+            stats = {}
+            for mkt in ["spreads", "h2h", "totals"]:
+                g = settled[settled["market"] == mkt]
+                if g.empty:
+                    continue
+                wins = int((g["result"] == "Win").sum())
+                losses = int((g["result"] == "Loss").sum())
+                pushes = int((g["result"] == "Push").sum())
+                n = wins + losses
+                if n == 0:
+                    continue
+                pnl_col = "profit_loss" if "profit_loss" in g.columns else None
+                pnl = float(pd.to_numeric(g[pnl_col], errors="coerce").sum()) if pnl_col else 0.0
+                roi = pnl / n if n else 0.0
+                win_pct = wins / n
+                stats[mkt] = {"w": wins, "l": losses, "p": pushes, "win_pct": win_pct, "roi": roi}
+            return stats
+        except Exception:
+            return {}
+
+    _tr = _market_track_record()
+    if _tr:
+        # Sort markets so the most profitable shows first
+        ordered = sorted(_tr.items(), key=lambda kv: -kv[1]["roi"])
+        cards = []
+        for mkt, s in ordered:
+            mkt_label = {"spreads": "📈 SPREADS", "h2h": "💰 MONEYLINE", "totals": "🎯 TOTALS"}.get(mkt, mkt.upper())
+            roi_pct = s["roi"] * 100
+            win_pct = s["win_pct"] * 100
+            # Color coding: green for profitable, gray for breakeven, red for losing
+            if roi_pct >= 5:
+                bg = "linear-gradient(135deg, #0a4a2a 0%, #0d6638 100%)"
+                accent = "#00FF88"
+                badge_emoji = "🔥"
+            elif roi_pct >= -1:
+                bg = "linear-gradient(135deg, #2a2a3a 0%, #3a3a4a 100%)"
+                accent = "#888899"
+                badge_emoji = "•"
+            else:
+                bg = "linear-gradient(135deg, #4a1a1a 0%, #6b2828 100%)"
+                accent = "#FF6B35"
+                badge_emoji = "❄️"
+            cards.append(f"""
+                <div style="background:{bg};padding:14px 18px;border-radius:10px;
+                            border-left:4px solid {accent};flex:1;min-width:200px;">
+                    <div style="font-size:11px;color:#aaa;letter-spacing:1.5px;font-weight:600;">
+                        {badge_emoji} {mkt_label}
+                    </div>
+                    <div style="font-size:28px;color:{accent};font-weight:700;
+                                font-family:'Space Mono',monospace;margin:6px 0 2px;">
+                        {roi_pct:+.1f}%
+                    </div>
+                    <div style="font-size:12px;color:#ccc;">
+                        {win_pct:.1f}% W &nbsp;·&nbsp; {s['w']}-{s['l']}-{s['p']} lifetime
+                    </div>
+                </div>
+            """)
+        st.markdown(f"""
+            <div style="margin:16px 0 24px;">
+                <div style="font-size:11px;color:#888;letter-spacing:2px;font-weight:600;
+                            margin-bottom:10px;">
+                    LIVE TRACK RECORD — UPDATED AFTER EVERY GRADE RUN
+                </div>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                    {''.join(cards)}
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
 
     edges_df = safe_fetch("edges")
     games_df_local = safe_fetch("games")
