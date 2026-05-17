@@ -70,13 +70,25 @@ def _final_score(game_id: str, game_date: str) -> Optional[dict]:
         away_score = _parse_int(game.get("awayTeam", {}).get("score"))
         if home_score is None or away_score is None:
             break
+        # NHL API renamed commonName → name some time after launch. Try `name`
+        # first, fall back to `commonName` for older response shapes. Without
+        # this, home_team/away_team came back as "" and _settle() defaulted
+        # every pick to LOSS — silently destroying NHL grading since the rename.
+        def _team_name(t: dict) -> str:
+            for key in ("name", "commonName"):
+                v = t.get(key)
+                if isinstance(v, dict):
+                    s = v.get("default")
+                    if s: return s
+            # last-resort fallback to placeName + abbrev so something useful lands
+            return t.get("placeName", {}).get("default") or t.get("abbrev", "")
         info = {
             "home_abbr":  home_abbr,
             "away_abbr":  away_abbr,
             "home_score": home_score,
             "away_score": away_score,
-            "home_team":  (game.get("homeTeam", {}).get("commonName", {}) or {}).get("default", ""),
-            "away_team":  (game.get("awayTeam", {}).get("commonName", {}) or {}).get("default", ""),
+            "home_team":  _team_name(game.get("homeTeam", {})),
+            "away_team":  _team_name(game.get("awayTeam", {})),
         }
         _score_cache[cache_key] = info
         return info
