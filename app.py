@@ -454,14 +454,19 @@ with tabs[0]:
             settled = fetch_shadow_picks(only_pending=False, settled_only=True)
             if settled is None or settled.empty:
                 return {}
+            # Normalize result case — historical data is lowercase ("win"/
+            # "loss") but the original code was checking capitalized values,
+            # which silently zeroed every market's track record.
+            settled = settled.copy()
+            settled["result_n"] = settled["result"].astype(str).str.lower()
             stats = {}
             for mkt in ["spreads", "h2h", "totals"]:
                 g = settled[settled["market"] == mkt]
                 if g.empty:
                     continue
-                wins = int((g["result"] == "Win").sum())
-                losses = int((g["result"] == "Loss").sum())
-                pushes = int((g["result"] == "Push").sum())
+                wins = int((g["result_n"] == "win").sum())
+                losses = int((g["result_n"] == "loss").sum())
+                pushes = int((g["result_n"] == "push").sum())
                 n = wins + losses
                 if n == 0:
                     continue
@@ -548,6 +553,23 @@ with tabs[0]:
         proven   = df[df["market"].isin(["spreads", "h2h"]) & (df["edge"] >= 0.04)]
         totals   = df[(df["market"] == "totals") & (df["edge"] >= 0.07)]
         candidates = pd.concat([proven, totals], ignore_index=True)
+
+        # Sample-size gate: only keep candidates whose market has ≥20 settled
+        # bets in the live track record. Markets with thin samples can't be
+        # called proven yet — hide them until the data matures.
+        MIN_MARKET_N = 20
+        if _tr:
+            _proven_n = {mkt: (s["w"] + s["l"]) for mkt, s in _tr.items()}
+            _ok_markets = {m for m, n in _proven_n.items() if n >= MIN_MARKET_N}
+            n_before = len(candidates)
+            candidates = candidates[candidates["market"].isin(_ok_markets)].copy()
+            n_hidden = n_before - len(candidates)
+            if n_hidden:
+                st.caption(
+                    f"🚧 {n_hidden} pick(s) hidden — markets with fewer than "
+                    f"{MIN_MARKET_N} settled bets are too thin to call. They "
+                    f"resurface automatically as the sample grows."
+                )
 
         # Game-level dedupe — keep highest-edge pick per (game_id, market) pair
         candidates = candidates.sort_values("edge", ascending=False)
