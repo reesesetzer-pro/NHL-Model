@@ -470,8 +470,17 @@ with tabs[0]:
                 n = wins + losses
                 if n == 0:
                     continue
+                # Winsorize each bet's PnL contribution at +5u before summing.
+                # Currently a no-op for game-level markets (max graded payout
+                # ~+2.25u), but defensive against future prop grading where a
+                # single +600/+800 longshot win could anchor a tier label.
+                # Matches NBA's Sweet Spot ROI methodology.
                 pnl_col = "profit_loss" if "profit_loss" in g.columns else None
-                pnl = float(pd.to_numeric(g[pnl_col], errors="coerce").sum()) if pnl_col else 0.0
+                if pnl_col:
+                    pnl_series = pd.to_numeric(g[pnl_col], errors="coerce").clip(upper=5.0)
+                    pnl = float(pnl_series.sum())
+                else:
+                    pnl = 0.0
                 roi = pnl / n if n else 0.0
                 win_pct = wins / n
                 stats[mkt] = {"w": wins, "l": losses, "p": pushes, "win_pct": win_pct, "roi": roi}
