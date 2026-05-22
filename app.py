@@ -510,32 +510,37 @@ with tabs[0]:
                 bg = "linear-gradient(135deg, #4a1a1a 0%, #6b2828 100%)"
                 accent = "#FF6B35"
                 badge_emoji = "❄️"
-            cards.append(f"""
-                <div style="background:{bg};padding:14px 18px;border-radius:10px;
-                            border-left:4px solid {accent};flex:1;min-width:200px;">
-                    <div style="font-size:11px;color:#aaa;letter-spacing:1.5px;font-weight:600;">
-                        {badge_emoji} {mkt_label}
-                    </div>
-                    <div style="font-size:28px;color:{accent};font-weight:700;
-                                font-family:'Space Mono',monospace;margin:6px 0 2px;">
-                        {roi_pct:+.1f}%
-                    </div>
-                    <div style="font-size:12px;color:#ccc;">
-                        {win_pct:.1f}% W &nbsp;·&nbsp; {s['w']}-{s['l']}-{s['p']} lifetime
-                    </div>
-                </div>
-            """)
-        st.markdown(f"""
-            <div style="margin:16px 0 24px;">
-                <div style="font-size:11px;color:#888;letter-spacing:2px;font-weight:600;
-                            margin-bottom:10px;">
-                    LIVE TRACK RECORD — UPDATED AFTER EVERY GRADE RUN
-                </div>
-                <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                    {''.join(cards)}
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+            # NOTE: no leading indent on these HTML strings — Streamlit's
+            # markdown parser treats any 4+ leading spaces as a code block,
+            # which renders the raw HTML as text on the page. Same bug we
+            # already fixed in UFL's streamlit_app.py.
+            cards.append(
+                f'<div style="background:{bg};padding:14px 18px;border-radius:10px;'
+                f'border-left:4px solid {accent};flex:1;min-width:200px;">'
+                f'<div style="font-size:11px;color:#aaa;letter-spacing:1.5px;font-weight:600;">'
+                f'{badge_emoji} {mkt_label}'
+                f'</div>'
+                f'<div style="font-size:28px;color:{accent};font-weight:700;'
+                f"font-family:'Space Mono',monospace;margin:6px 0 2px;\">"
+                f'{roi_pct:+.1f}%'
+                f'</div>'
+                f'<div style="font-size:12px;color:#ccc;">'
+                f"{win_pct:.1f}% W &nbsp;·&nbsp; {s['w']}-{s['l']}-{s['p']} lifetime"
+                f'</div>'
+                f'</div>'
+            )
+        banner_html = (
+            '<div style="margin:16px 0 24px;">'
+            '<div style="font-size:11px;color:#888;letter-spacing:2px;'
+            'font-weight:600;margin-bottom:10px;">'
+            'LIVE TRACK RECORD — UPDATED AFTER EVERY GRADE RUN'
+            '</div>'
+            '<div style="display:flex;gap:12px;flex-wrap:wrap;">'
+            + ''.join(cards) +
+            '</div>'
+            '</div>'
+        )
+        st.markdown(banner_html, unsafe_allow_html=True)
 
     edges_df = safe_fetch("edges")
     games_df_local = safe_fetch("games")
