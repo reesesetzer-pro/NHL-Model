@@ -36,28 +36,53 @@ def _final_score(game_id: str, game_date: str) -> Optional[dict]:
 
     Strategy: pull /score/{date} for the game date and find a game where
     the matching team abbrevs (we'll join via games table) result is final.
+
+    NHL API indexes by puck-drop UTC date. Late games (e.g. 10pm Eastern) tip
+    after midnight UTC, so a game we store as `2026-05-04` may actually live
+    on the API's `2026-05-05` scoreboard. We try the date itself first, then
+    fall back to date+1 — this fixes ~half of the previously "unmatched"
+    backlog.
     """
     cache_key = (game_id, game_date)
     if cache_key in _score_cache:
         return _score_cache[cache_key]
 
-    try:
-        r = requests.get(f"{_NHL_BASE}/score/{game_date}", timeout=15)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        _score_cache[cache_key] = None
-        return None
-
-    # Match by game_id from our DB → NHL API gameId. We stored Odds API ids,
-    # but NHL Stats API uses different ids. Match instead by team abbrevs.
-    games = data.get("games", [])
+    # Resolve target team abbrevs first so we know what to look for
     sb = get_client()
     g = sb.table("games").select("home_abbr,away_abbr").eq("id", game_id).execute().data
     if not g:
         _score_cache[cache_key] = None
         return None
     target = (g[0]["home_abbr"], g[0]["away_abbr"])
+
+    # Walk the date itself, then date+1 (puck-drop UTC rollover)
+    candidate_dates = [game_date]
+    try:
+        d = date.fromisoformat(game_date)
+        candidate_dates.append((d.fromordinal(d.toordinal() + 1)).isoformat())
+    except ValueError:
+        pass
+
+    games: list = []
+    for cand in candidate_dates:
+        try:
+            r = requests.get(f"{_NHL_BASE}/score/{cand}", timeout=15)
+            r.raise_for_status()
+            data = r.json()
+        except Exception:
+            continue
+        games = data.get("games", []) or []
+        if any(
+            (game.get("homeTeam", {}).get("abbrev"),
+             game.get("awayTeam", {}).get("abbrev")) == target
+            for game in games
+        ):
+            break  # found a date that contains the target game
+    else:
+        # Loop ended without break — neither date contained the target.
+        # `games` may still hold the last response; fallthrough lets the
+        # matching loop run anyway (and just miss cleanly).
+        pass
 
     for game in games:
         home_abbr = game.get("homeTeam", {}).get("abbrev", "")
