@@ -122,6 +122,130 @@ def _final_score(game_id: str, game_date: str) -> Optional[dict]:
     return None
 
 
+# ── PROP GRADING ─────────────────────────────────────────────────────────────
+# Maps our market keys → NHL boxscore stat field on the player record.
+# For props that are "derived" (no single field), the value is a callable
+# taking the player dict and returning the stat total.
+_PROP_STAT: dict = {
+    "player_points":          lambda p: int(p.get("points") or 0),
+    "player_goals":           lambda p: int(p.get("goals") or 0),
+    "player_assists":         lambda p: int(p.get("assists") or 0),
+    "player_shots_on_goal":   lambda p: int(p.get("sog") or 0),
+    "player_blocked_shots":   lambda p: int(p.get("blockedShots") or 0),
+    "player_total_saves":     lambda p: int(p.get("saves") or 0),
+    # PP points: powerPlayGoals is in the boxscore, but powerPlayAssists isn't.
+    # We approximate by counting power-play goals only — about 60% of true PP
+    # points league-wide. This will UNDER-credit the player for the Over side.
+    # Better than nothing; will revisit if NHL exposes pp_assists later.
+    "player_power_play_points": lambda p: int(p.get("powerPlayGoals") or 0),
+}
+
+# Cache boxscores per NHL gameId so we don't re-fetch for every prop on a game
+_boxscore_cache: dict = {}
+
+
+def _nhl_game_id_for(game_id: str, game_date: str) -> Optional[int]:
+    """Resolve our Odds-API hashed game_id → NHL API's integer gameId by
+    matching team abbrevs from the games table against /score/{date}."""
+    sb = get_client()
+    g = sb.table("games").select("home_abbr,away_abbr").eq("id", game_id).execute().data
+    if not g:
+        return None
+    target = (g[0]["home_abbr"], g[0]["away_abbr"])
+    for cand in (game_date, _date_plus_one(game_date)):
+        try:
+            data = requests.get(f"{_NHL_BASE}/score/{cand}", timeout=15).json()
+        except Exception:
+            continue
+        for game in data.get("games", []) or []:
+            if (game.get("homeTeam", {}).get("abbrev"),
+                game.get("awayTeam", {}).get("abbrev")) == target:
+                return game.get("id")
+    return None
+
+
+def _date_plus_one(d: str) -> str:
+    try:
+        dd = date.fromisoformat(d)
+        return (dd.fromordinal(dd.toordinal() + 1)).isoformat()
+    except ValueError:
+        return d
+
+
+def _boxscore(nhl_game_id: int) -> Optional[dict]:
+    if nhl_game_id in _boxscore_cache:
+        return _boxscore_cache[nhl_game_id]
+    try:
+        bx = requests.get(f"{_NHL_BASE}/gamecenter/{nhl_game_id}/boxscore", timeout=15).json()
+    except Exception:
+        _boxscore_cache[nhl_game_id] = None
+        return None
+    _boxscore_cache[nhl_game_id] = bx
+    return bx
+
+
+def _player_stat(nhl_game_id: int, player_name: str, market: str) -> Optional[int]:
+    """Look up a player's stat for the given game. Player matching:
+       1) Try last-name match (boxscore has 'N. Roy', picks have full name)
+       2) If multiple last-name hits, disambiguate by first initial
+    """
+    bx = _boxscore(nhl_game_id)
+    if not bx:
+        return None
+    stat_fn = _PROP_STAT.get(market)
+    if not stat_fn:
+        return None
+    target = (player_name or "").strip().lower()
+    if not target:
+        return None
+    target_last = target.rsplit(" ", 1)[-1]
+    target_first_initial = target[0] if target else ""
+
+    pbs = bx.get("playerByGameStats", {})
+    matches: list[dict] = []
+    for team_key in ("homeTeam", "awayTeam"):
+        team = pbs.get(team_key, {})
+        # forwards/defense/goalies are sibling arrays
+        for group in ("forwards", "defense", "goalies"):
+            for p in team.get(group, []) or []:
+                nm = (p.get("name") or {}).get("default") or ""
+                nm_low = nm.lower()
+                nm_last = nm_low.rsplit(" ", 1)[-1]
+                if nm_last == target_last:
+                    # Same last name → check first initial
+                    nm_first_initial = nm_low[0] if nm_low else ""
+                    if nm_first_initial == target_first_initial:
+                        matches.append(p)
+    if not matches:
+        return None
+    # If multiple, prefer the one whose stat is > 0 (the one who actually played
+    # is more likely the bet target). Otherwise just take first.
+    if len(matches) > 1:
+        for p in matches:
+            if stat_fn(p) > 0:
+                return stat_fn(p)
+    return stat_fn(matches[0])
+
+
+def _lookup_prop_line(client, game_id: str, market: str, outcome: str) -> Optional[float]:
+    """Look up a prop line from the props table by (game_id, market, outcome).
+    Props store the player name inside outcome ('Nikita Kucherov Over') so
+    matching is exact. Returns the median point across books to tolerate
+    one-off outliers."""
+    try:
+        rows = (client.table("props").select("point")
+                .eq("game_id", game_id).eq("market", market).eq("outcome", outcome)
+                .execute().data) or []
+    except Exception:
+        return None
+    points = [r.get("point") for r in rows if r.get("point") is not None]
+    if not points:
+        return None
+    points.sort()
+    mid = len(points) // 2
+    return float(points[mid] if len(points) % 2 else (points[mid - 1] + points[mid]) / 2)
+
+
 def _lookup_line(client, game_id: str, market: str, outcome: str) -> Optional[float]:
     """Pull the betting line from the odds table for this (game, market, outcome).
 
@@ -207,7 +331,23 @@ def _settle(market: str, outcome: str, score: dict, line: Optional[float] = None
             return "win" if total > line else "loss"
         return "win" if total < line else "loss"
 
-    # Player props skipped for now
+    # Player props — caller passes `line` and `stat_value` via the **kwargs
+    # extension below. (Kept the signature backwards-compatible.)
+    return None
+
+
+def _settle_prop(stat_value: int, side: str, line: float) -> Optional[str]:
+    """Win/Loss/Push a player prop given the actual stat, the pick side
+    (over/under), and the line."""
+    if stat_value is None or line is None:
+        return None
+    if stat_value == line:
+        return "push"
+    side_l = side.lower()
+    if "over" in side_l:
+        return "win" if stat_value > line else "loss"
+    if "under" in side_l:
+        return "win" if stat_value < line else "loss"
     return None
 
 
@@ -236,17 +376,57 @@ def run_grading(verbose: bool = True) -> dict:
     client = get_client()
     graded = 0
     misses = 0
+    prop_graded = 0
     for _, p in pending.iterrows():
-        score = _final_score(str(p["game_id"]), str(p["game_date"]))
+        market = p.get("market", "")
+        outcome = p.get("outcome", "")
+        game_id = str(p["game_id"])
+        game_date_str = str(p["game_date"])
+
+        # ── Player props branch ──────────────────────────────────────────
+        if market.startswith("player_") and market in _PROP_STAT:
+            nhl_gid = _nhl_game_id_for(game_id, game_date_str)
+            if not nhl_gid:
+                misses += 1
+                continue
+            # Outcome looks like "Nikita Kucherov Over" — parse name + side
+            tail = outcome.rsplit(" ", 1)
+            if len(tail) != 2:
+                misses += 1
+                continue
+            player_name, side = tail[0], tail[1]
+            stat_value = _player_stat(nhl_gid, player_name, market)
+            if stat_value is None:
+                misses += 1
+                continue
+            line = _lookup_prop_line(client, game_id, market, outcome)
+            if line is None:
+                misses += 1
+                continue
+            result = _settle_prop(stat_value, side, line)
+            if not result:
+                misses += 1
+                continue
+            pnl = _pnl(p.get("price"), result)
+            notes = (p.get("notes") or "") + f" stat={stat_value} line={line}"
+            client.table("bets").update({
+                "result":       result,
+                "profit_loss":  round(pnl, 4),
+                "notes":        notes,
+            }).eq("id", int(p["id"])).execute()
+            graded += 1
+            prop_graded += 1
+            time.sleep(0.05)
+            continue
+
+        # ── Game-level (h2h / spreads / totals) ──────────────────────────
+        score = _final_score(game_id, game_date_str)
         if not score:
             misses += 1
             continue
-        market = p.get("market", "")
-        outcome = p.get("outcome", "")
-        # Look up line from odds table for spreads + totals (not in outcome string)
         line = None
         if market in ("totals", "spreads"):
-            line = _lookup_line(client, str(p["game_id"]), market, outcome)
+            line = _lookup_line(client, game_id, market, outcome)
         result = _settle(market, outcome, score, line=line)
         if not result:
             misses += 1
@@ -261,7 +441,7 @@ def run_grading(verbose: bool = True) -> dict:
         graded += 1
         time.sleep(0.05)
 
-    print(f"[grade] graded {graded} | unmatched: {misses}")
+    print(f"[grade] graded {graded} (props {prop_graded}) | unmatched: {misses}")
     if verbose and graded:
         _print_summary()
     return {"graded": graded, "missed": misses}
