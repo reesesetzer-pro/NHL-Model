@@ -440,9 +440,13 @@ tabs = st.tabs([
 # ─────────────────────────────────────────────────────────────────────────────
 with tabs[0]:
     st.markdown("## 🎯 Must Take")
-    st.caption("Tiered NHL picks by win-prob conviction. Proven markets only "
-               "(spreads + h2h). Totals included only when edge is large since "
-               "the model is breakeven on them historically.")
+    st.caption(
+        "Tiered NHL picks by win-prob conviction. **Spreads only** (+3.1% "
+        "ROI lifetime), with totals included when edge ≥ 7% (breakeven "
+        "market — need bigger margin). h2h dropped 2026-05-23 after the "
+        "paginated data showed -18.6% ROI on n=99 — a real losing market, "
+        "not a sample artifact."
+    )
 
     # ── Live track-record banner ──────────────────────────────────────────────
     # Pulls lifetime W-L + ROI from settled shadow picks. Updates after every
@@ -557,24 +561,31 @@ with tabs[0]:
     else:
         df = edges_df[edges_df["game_id"].isin(upcoming_ids)].copy()
 
-        # Filter rules:
-        # - spreads/h2h: edge ≥ 4% (proven markets)
-        # - totals:     edge ≥ 7% (model is breakeven; need bigger margin)
-        # - props:      excluded (separate tab)
+        # Filter rules (retuned 2026-05-23 against the full paginated data):
+        # - spreads: edge ≥ 4% (the ONLY +EV game-level market at +3.1% ROI)
+        # - totals:  edge ≥ 7% (model is breakeven at -0.8% ROI lifetime)
+        # - h2h:     DROPPED. Lifetime is -18.6% ROI / 44.4% hit on n=99 —
+        #            cannot be called "proven". A market that consistently
+        #            loses money over ~100 bets is a leak, not an edge.
+        # - props:   excluded (separate tab)
         df["model_prob"] = df["model_prob"].astype(float)
         df["edge"]       = df["edge"].astype(float)
 
-        proven   = df[df["market"].isin(["spreads", "h2h"]) & (df["edge"] >= 0.04)]
-        totals   = df[(df["market"] == "totals") & (df["edge"] >= 0.07)]
-        candidates = pd.concat([proven, totals], ignore_index=True)
+        spreads  = df[(df["market"] == "spreads") & (df["edge"] >= 0.04)]
+        totals   = df[(df["market"] == "totals")  & (df["edge"] >= 0.07)]
+        candidates = pd.concat([spreads, totals], ignore_index=True)
 
-        # Sample-size gate: only keep candidates whose market has ≥20 settled
-        # bets in the live track record. Markets with thin samples can't be
-        # called proven yet — hide them until the data matures.
+        # Sample-size + lifetime-ROI gates: surface only markets with
+        # ≥20 settled bets AND non-negative lifetime ROI in the track record.
+        # The market-list rule above already excludes h2h on principle; this
+        # belt-and-suspenders check also catches totals if it slips negative.
         MIN_MARKET_N = 20
+        MIN_MARKET_ROI = -0.02  # tolerate slight bleed (~vig) but no real losers
         if _tr:
-            _proven_n = {mkt: (s["w"] + s["l"]) for mkt, s in _tr.items()}
-            _ok_markets = {m for m, n in _proven_n.items() if n >= MIN_MARKET_N}
+            _ok_markets = {
+                m for m, s in _tr.items()
+                if (s["w"] + s["l"]) >= MIN_MARKET_N and s["roi"] >= MIN_MARKET_ROI
+            }
             n_before = len(candidates)
             candidates = candidates[candidates["market"].isin(_ok_markets)].copy()
             n_hidden = n_before - len(candidates)
