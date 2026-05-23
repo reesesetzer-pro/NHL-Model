@@ -441,11 +441,12 @@ tabs = st.tabs([
 with tabs[0]:
     st.markdown("## 🎯 Must Take")
     st.caption(
-        "Tiered NHL picks by win-prob conviction. **Spreads only** (+3.1% "
-        "ROI lifetime), with totals included when edge ≥ 7% (breakeven "
-        "market — need bigger margin). h2h dropped 2026-05-23 after the "
-        "paginated data showed -18.6% ROI on n=99 — a real losing market, "
-        "not a sample artifact."
+        "Tiered NHL picks by win-prob conviction. **Totals is the only "
+        "+EV game-level market** (53.2% hit · +7.6% ROI on n=62, +EV-only). "
+        "Surfaced at edge ≥ 4%. Spreads gated to edge ≥ 7% — historical "
+        "lifetime is -28.5% so only flag when the model sees real value. "
+        "h2h dropped (-25.1% ROI). Numbers corrected 2026-05-23 after "
+        "auditing a mirror-side logging bug that masked the real picture."
     )
 
     # ── Live track-record banner ──────────────────────────────────────────────
@@ -568,19 +569,22 @@ with tabs[0]:
     else:
         df = edges_df[edges_df["game_id"].isin(upcoming_ids)].copy()
 
-        # Filter rules (retuned 2026-05-23 against the full paginated data):
-        # - spreads: edge ≥ 4% (the ONLY +EV game-level market at +3.1% ROI)
-        # - totals:  edge ≥ 7% (model is breakeven at -0.8% ROI lifetime)
-        # - h2h:     DROPPED. Lifetime is -18.6% ROI / 44.4% hit on n=99 —
-        #            cannot be called "proven". A market that consistently
-        #            loses money over ~100 bets is a leak, not an edge.
-        # - props:   excluded (separate tab)
+        # Filter rules (corrected 2026-05-23 PM after audit of mirror-side
+        # logging bug. Earlier numbers showed spreads as +EV but that was
+        # the both-sides tautology. Honest +EV-only lifetime:
+        #   totals:  53.2% / +7.6% ROI on n=62  ← the ONLY +EV game-level
+        #   h2h:     41.2% / -25.1% on n=51    ← real money leak
+        #   spreads: 36.4% / -28.5% on n=66    ← worse than h2h
+        #
+        # Inverted the gate: totals at edge ≥ 4% (proven), spreads at edge
+        # ≥ 7% (raise the bar — only surface if model thinks there's real
+        # value, since lifetime is bleeding). h2h still dropped.
         df["model_prob"] = df["model_prob"].astype(float)
         df["edge"]       = df["edge"].astype(float)
 
-        spreads  = df[(df["market"] == "spreads") & (df["edge"] >= 0.04)]
-        totals   = df[(df["market"] == "totals")  & (df["edge"] >= 0.07)]
-        candidates = pd.concat([spreads, totals], ignore_index=True)
+        totals   = df[(df["market"] == "totals")  & (df["edge"] >= 0.04)]
+        spreads  = df[(df["market"] == "spreads") & (df["edge"] >= 0.07)]
+        candidates = pd.concat([totals, spreads], ignore_index=True)
 
         # Sample-size + lifetime-ROI gates: surface only markets with
         # ≥20 settled bets AND non-negative lifetime ROI in the track record.
