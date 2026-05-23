@@ -92,11 +92,23 @@ def shadow_log_edges(edges: list[dict], sync_date: Optional[date] = None) -> int
 
 
 def fetch_shadow_picks(only_pending: bool = True, settled_only: bool = False):
+    """Pull shadow picks from `bets`. Paginates via .range() because Supabase
+    caps a single REST query at 1000 rows by default — without this the
+    dashboard track-record / calibration silently truncated at 1000 picks."""
     import pandas as pd
     client = get_client()
-    q = client.table("bets").select("*").ilike("notes", f"%{SHADOW_MARKER}%")
-    if only_pending:
-        q = q.eq("result", "pending")
-    elif settled_only:
-        q = q.in_("result", ["win", "loss", "push"])
-    return pd.DataFrame(q.execute().data or [])
+    PAGE = 1000
+    all_rows: list[dict] = []
+    offset = 0
+    while True:
+        q = client.table("bets").select("*").ilike("notes", f"%{SHADOW_MARKER}%")
+        if only_pending:
+            q = q.eq("result", "pending")
+        elif settled_only:
+            q = q.in_("result", ["win", "loss", "push"])
+        page = q.range(offset, offset + PAGE - 1).execute().data or []
+        all_rows.extend(page)
+        if len(page) < PAGE:
+            break
+        offset += PAGE
+    return pd.DataFrame(all_rows)
