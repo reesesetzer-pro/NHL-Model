@@ -463,6 +463,13 @@ with tabs[0]:
             # which silently zeroed every market's track record.
             settled = settled.copy()
             settled["result_n"] = settled["result"].astype(str).str.lower()
+            # Filter to +EV side only. The edge engine USED to log both
+            # Over and Under per prop (fixed 2026-05-23), which produced
+            # tautological 50/50 W-L splits across every market. Restricting
+            # the banner to edge_at_bet > 0 keeps the model-pick view honest
+            # on historical data; new picks will already be filtered upstream.
+            settled["edge_at_bet"] = pd.to_numeric(settled.get("edge_at_bet", 0), errors="coerce")
+            settled = settled[settled["edge_at_bet"] > 0]
             stats = {}
             for mkt in ["spreads", "h2h", "totals"]:
                 g = settled[settled["market"] == mkt]

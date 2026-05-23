@@ -791,11 +791,21 @@ def calculate_all_edges(game_id: Optional[str] = None) -> list[dict]:
     if edges:
         upsert("edges", edges, on_conflict="id")
 
-    # Shadow-log for grading + future calibration
+    # Shadow-log for grading + future calibration.
+    #
+    # CRITICAL: log ONLY the +EV side of paired markets, not every edge row.
+    # Each prop / spread / total has two sides (Over/Under, home/away, ...);
+    # logging both sides tautologically produces a 50/50 W-L split that
+    # tells us nothing about model accuracy. We surface only picks where
+    # `edge > 0` — i.e. the side the model actually prefers vs the no-vig
+    # market probability. This was the bug responsible for 143-143 /
+    # 155-155 / 158-159 hit rates across the prop markets (2026-05-23).
     try:
-        n_logged = shadow_log_edges(edges)
+        actionable = [e for e in edges if (e.get("edge") or 0) > 0]
+        n_logged = shadow_log_edges(actionable)
         if n_logged:
-            print(f"[edge] shadow-logged {n_logged} picks")
+            print(f"[edge] shadow-logged {n_logged} picks "
+                  f"(+EV side only; dropped {len(edges) - len(actionable)} mirror sides)")
     except Exception as log_err:
         print(f"[edge] shadow-log skipped: {log_err}")
 
