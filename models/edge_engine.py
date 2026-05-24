@@ -30,6 +30,7 @@ from models.win_probability import model_probability
 
 _MAX_PLAUSIBLE_EDGE = 0.18  # 18pp — anything bigger is almost always a model bug
 _PAIRED_SUM_TOLERANCE = 0.05  # |sum - 1.0| above this triggers renormalize
+_COINFLIP_EPSILON = 0.03  # within 3pp of 50% = model has no real opinion
 
 
 def _sanity_filter(edges: list[dict]) -> list[dict]:
@@ -75,20 +76,36 @@ def _sanity_filter(edges: list[dict]) -> list[dict]:
     if renorm_count:
         print(f"[edge] sanity: renormalized {renorm_count} paired markets (sum != 1.0)")
 
-    # Suppress implausible edges
+    # Suppress implausible edges + no-signal coin-flip artifacts
     kept = []
     suppressed = 0
+    coinflip = 0
     for e in edges:
         try:
             edge_val = abs(float(e.get("edge") or 0))
+            model_p  = float(e.get("model_prob") or 0)
         except Exception:
-            edge_val = 0
+            edge_val, model_p = 0, 0
+        # 1. Model overshoot — edge too large to be real
         if edge_val > _MAX_PLAUSIBLE_EDGE:
             suppressed += 1
+            continue
+        # 2. No-signal coin flip — when the model sits within 3pp of 50% but
+        #    posts a meaningful edge, it's not finding value; it just has no
+        #    opinion and the "edge" is the gap between a coin-flip default and
+        #    a sharp market line. Classic example: COL/VGK Cup Final where the
+        #    model said COL -1.5 at 50.6% vs a 34.9% market → fake +15.8% edge.
+        #    A genuinely 50/50 game has ~0 edge and wouldn't surface anyway, so
+        #    this only ever catches the artifact case.
+        if abs(model_p - 0.50) < _COINFLIP_EPSILON and edge_val >= 0.04:
+            coinflip += 1
             continue
         kept.append(e)
     if suppressed:
         print(f"[edge] sanity: suppressed {suppressed} edges above {_MAX_PLAUSIBLE_EDGE*100:.0f}pp (model overshoot)")
+    if coinflip:
+        print(f"[edge] sanity: suppressed {coinflip} no-signal coin-flip edges "
+              f"(model within {_COINFLIP_EPSILON*100:.0f}pp of 50% but posting ≥4% edge)")
     return kept
 
 
