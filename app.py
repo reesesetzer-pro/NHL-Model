@@ -993,7 +993,25 @@ with tabs[2]:
             edges_today = edges_df.copy()
 
         edges_today = edges_today[edges_today["edge"] >= min_edge_val].copy()
+
+        # Suppress puck-line (spread) edges from the display. The NHL puck-line
+        # model overshoots and is unstable (a COL/VGK Cup Final pick showed
+        # +15.8% one run, +11.6% the next, off a model anchored near 50% with
+        # no real read on the game). Lifetime it's 36.4% hit / -28.5% ROI —
+        # surfacing these "edges" can only mislead. Hidden until the puck-line
+        # model is rebuilt; the data still lands in the DB for analysis.
+        # Re-enable by removing "spreads" from _SUPPRESSED_GAME_MARKETS.
+        _SUPPRESSED_GAME_MARKETS = {"spreads"}
+        _n_suppressed = int(edges_today["market"].isin(_SUPPRESSED_GAME_MARKETS).sum())
+        edges_today = edges_today[~edges_today["market"].isin(_SUPPRESSED_GAME_MARKETS)].copy()
         edges_today = edges_today.sort_values("edge", ascending=False)
+
+        if _n_suppressed:
+            st.caption(
+                f"🚧 {_n_suppressed} puck-line (spread) edge(s) hidden — the NHL "
+                f"puck-line model overshoots (-28.5% ROI lifetime) and isn't "
+                f"trustworthy yet. Moneyline + totals shown below."
+            )
 
         if not edges_today.empty:
             st.markdown("""
