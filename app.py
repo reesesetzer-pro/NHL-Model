@@ -585,7 +585,12 @@ with tabs[0]:
         df["model_prob"] = df["model_prob"].astype(float)
         df["edge"]       = df["edge"].astype(float)
 
-        totals   = df[(df["market"] == "totals")  & (df["edge"] >= 0.04)]
+        # Totals threshold lowered from 4% → 3% on 2026-05-26 after user
+        # flagged the COL @ VGK Cup Final game showing nothing — the model
+        # had a real +3.7% Under read but the 4% gate hid it. Totals is +EV
+        # lifetime (53.2% / +7.6%), so a slightly more permissive threshold
+        # is honest. Spreads stays at 7% (raised bar; that market bleeds).
+        totals   = df[(df["market"] == "totals")  & (df["edge"] >= 0.03)]
         spreads  = df[(df["market"] == "spreads") & (df["edge"] >= 0.07)]
         candidates = pd.concat([totals, spreads], ignore_index=True)
 
@@ -615,11 +620,35 @@ with tabs[0]:
         candidates = candidates.drop_duplicates(subset=["game_id", "market"], keep="first")
 
         if candidates.empty:
-            st.warning(
-                "⚠️ Zero NHL picks meet Must-Take filters tonight. **Sit it out** — "
-                "no proven-market plays clearing thresholds. Other tabs have softer "
-                "opportunities at your own risk."
-            )
+            # Don't go blank — surface the model's best read on tonight's
+            # games even when nothing clears the threshold. Otherwise the
+            # user has no signal on a 1-game playoff slate beyond "blank."
+            df_today = df[df["market"].isin({"totals", "h2h"})].copy()
+            df_today = df_today[df_today["edge"] > 0]
+            if _tr:
+                df_today = df_today[df_today["market"].isin(_ok_markets)]
+            best = df_today.sort_values("edge", ascending=False).head(3)
+            if best.empty:
+                st.warning(
+                    "⚠️ No NHL signal on tonight's slate at all — "
+                    "the model has no positive read in proven markets. **Sit it out.**"
+                )
+            else:
+                st.info(
+                    "📉 **No picks cleared the MUST TAKE thresholds tonight.** "
+                    "Below-threshold reads on the slate (track only, smaller stakes if anything):"
+                )
+                for _, r in best.iterrows():
+                    mkt = r["market"]
+                    out = r["outcome"]
+                    edge = float(r["edge"]) * 100
+                    prob = float(r["model_prob"]) * 100
+                    price = int(float(r.get("best_price", 0)))
+                    book = str(r.get("best_book", ""))
+                    pstr = f"+{price}" if price > 0 else str(price)
+                    st.markdown(
+                        f"- **{mkt} · {out}** @ {pstr} ({book}) — model {prob:.1f}%, edge {edge:+.1f}%"
+                    )
         else:
             # Tier by model_prob (NHL is tighter than NBA — different breakpoints)
             tiers = [
