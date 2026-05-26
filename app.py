@@ -557,17 +557,20 @@ with tabs[0]:
     edges_df = safe_fetch("edges")
     games_df_local = safe_fetch("games")
 
-    # Filter to today + future game edges
+    # Filter to TODAY's games only. Earlier this used game_date >= today which
+    # leaked tomorrow's slate into MUST TAKE (e.g. CAR @ MTL surfacing the
+    # night BEFORE the game) — user flagged 2026-05-26. MUST TAKE is a "what
+    # do I bet tonight" view; tomorrow's edges should wait until tomorrow.
     from datetime import date as _d, timedelta as _td
     today = _d.today().isoformat()
-    upcoming_ids = []
+    today_ids = []
     if not games_df_local.empty and "game_date" in games_df_local.columns:
-        upcoming_ids = games_df_local[games_df_local["game_date"] >= today]["id"].tolist()
+        today_ids = games_df_local[games_df_local["game_date"] == today]["id"].tolist()
 
-    if edges_df.empty or not upcoming_ids:
-        st.info("No upcoming edges yet — run odds_sync + edge_engine first.")
+    if edges_df.empty or not today_ids:
+        st.info("No games for tonight, or no edges yet — run odds_sync + edge_engine first.")
     else:
-        df = edges_df[edges_df["game_id"].isin(upcoming_ids)].copy()
+        df = edges_df[edges_df["game_id"].isin(today_ids)].copy()
 
         # Filter rules (corrected 2026-05-23 PM after audit of mirror-side
         # logging bug. Earlier numbers showed spreads as +EV but that was
