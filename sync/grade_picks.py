@@ -55,10 +55,14 @@ def _final_score(game_id: str, game_date: str) -> Optional[dict]:
         return None
     target = (g[0]["home_abbr"], g[0]["away_abbr"])
 
-    # Walk the date itself, then date+1 (puck-drop UTC rollover)
+    # Walk date / date-1 / date+1 to handle both UTC rollover directions.
+    # Shadow picks may store the bet's commence_time UTC date (which can be
+    # +1 from the box-score date for late-night Eastern games) OR a manual
+    # date that's -1 from the NHL API's index. ±1 catches both.
     candidate_dates = [game_date]
     try:
         d = date.fromisoformat(game_date)
+        candidate_dates.append((d.fromordinal(d.toordinal() - 1)).isoformat())
         candidate_dates.append((d.fromordinal(d.toordinal() + 1)).isoformat())
     except ValueError:
         pass
@@ -152,7 +156,8 @@ def _nhl_game_id_for(game_id: str, game_date: str) -> Optional[int]:
     if not g:
         return None
     target = (g[0]["home_abbr"], g[0]["away_abbr"])
-    for cand in (game_date, _date_plus_one(game_date)):
+    # ±1 day fallback for UTC rollover (see _final_score for the same reason)
+    for cand in (game_date, _date_minus_one(game_date), _date_plus_one(game_date)):
         try:
             data = requests.get(f"{_NHL_BASE}/score/{cand}", timeout=15).json()
         except Exception:
@@ -162,6 +167,14 @@ def _nhl_game_id_for(game_id: str, game_date: str) -> Optional[int]:
                 game.get("awayTeam", {}).get("abbrev")) == target:
                 return game.get("id")
     return None
+
+
+def _date_minus_one(d: str) -> str:
+    try:
+        dd = date.fromisoformat(d)
+        return (dd.fromordinal(dd.toordinal() - 1)).isoformat()
+    except ValueError:
+        return d
 
 
 def _date_plus_one(d: str) -> str:
@@ -184,10 +197,24 @@ def _boxscore(nhl_game_id: int) -> Optional[dict]:
     return bx
 
 
+def _strip_diacritics(s: str) -> str:
+    """Normalize Unicode: 'Slafkovský' → 'Slafkovsky'. Critical for matching
+    bet outcomes (typically ASCII) against NHL boxscore names (often
+    contain accents on European players)."""
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFKD", s)
+                   if not unicodedata.combining(c))
+
+
 def _player_stat(nhl_game_id: int, player_name: str, market: str) -> Optional[int]:
     """Look up a player's stat for the given game. Player matching:
        1) Try last-name match (boxscore has 'N. Roy', picks have full name)
        2) If multiple last-name hits, disambiguate by first initial
+
+    Names are Unicode-normalized so 'Juraj Slafkovsky' (bet) matches
+    'J. Slafkovský' (boxscore). Without this normalization, every prop on
+    a player with an accented name silently failed to grade — caught
+    2026-06-06 while clearing a 700+ pending prop backlog.
     """
     bx = _boxscore(nhl_game_id)
     if not bx:
@@ -195,7 +222,7 @@ def _player_stat(nhl_game_id: int, player_name: str, market: str) -> Optional[in
     stat_fn = _PROP_STAT.get(market)
     if not stat_fn:
         return None
-    target = (player_name or "").strip().lower()
+    target = _strip_diacritics((player_name or "").strip()).lower()
     if not target:
         return None
     target_last = target.rsplit(" ", 1)[-1]
@@ -209,7 +236,7 @@ def _player_stat(nhl_game_id: int, player_name: str, market: str) -> Optional[in
         for group in ("forwards", "defense", "goalies"):
             for p in team.get(group, []) or []:
                 nm = (p.get("name") or {}).get("default") or ""
-                nm_low = nm.lower()
+                nm_low = _strip_diacritics(nm).lower()
                 nm_last = nm_low.rsplit(" ", 1)[-1]
                 if nm_last == target_last:
                     # Same last name → check first initial
