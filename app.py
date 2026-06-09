@@ -1538,7 +1538,7 @@ with tabs[5]:
             st.html("</div>")
 
         with left_col:
-            # Filters
+            # Filters — row 1: market / confidence / team
             fc1, fc2, fc3 = st.columns([2, 2, 2])
             with fc1:
                 mkt_map = {
@@ -1561,11 +1561,32 @@ with tabs[5]:
                 team_opts = ["All Teams"] + sorted(props_df["team_abbr"].dropna().unique().tolist())
                 team_filter = st.selectbox("Team", team_opts)
 
+            # Filters — row 2: price band sliders (same defaults as Best Bets tab)
+            pfc1, pfc2 = st.columns([1, 1])
+            with pfc1:
+                pf_max_chalk = st.slider(
+                    "Cap chalk (max negative price)", -1000, -100, -400, 25,
+                    key="nhl_pf_max_chalk",
+                    help="Hide any line priced lower (more juiced) than this. "
+                         "−400 hides extreme chalk; set to −1000 to show everything.",
+                )
+            with pfc2:
+                pf_max_dog = st.slider(
+                    "Cap longshots (max positive price)", 100, 1500, 600, 50,
+                    key="nhl_pf_max_dog",
+                    help="Hide any line priced higher (longer odds) than this. "
+                         "Default 600 lets +500 dogs in but kills lottery tickets.",
+                )
+
             filtered = props_df.copy()
             if prop_mkt != "All":
                 filtered = filtered[filtered["market"] == prop_mkt]
             if team_filter != "All Teams":
                 filtered = filtered[filtered["team_abbr"] == team_filter]
+
+            # Price band
+            _pf_price_num = pd.to_numeric(filtered["price"], errors="coerce")
+            filtered = filtered[(_pf_price_num >= pf_max_chalk) & (_pf_price_num <= pf_max_dog)]
 
             # Probability threshold
             prob_threshold = {"Any": 0.0, "Lean 55%+": 0.55, "Strong 62%+": 0.62, "Lock 72%+": 0.72}
