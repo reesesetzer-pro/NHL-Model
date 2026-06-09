@@ -1149,9 +1149,16 @@ with tabs[2]:
 
     # ── Prop edges ────────────────────────────────────────────────────────────
     if not props_df.empty:
+        # Price-band gate: hide extreme chalk (-500 or worse) and longshot
+        # noise (+600 or more). Books price 4th-line grinders at -1000+ to
+        # NOT record an assist, which is mathematically real but never
+        # bettable; user flagged these surfacing as confusing 2026-06-09.
+        _price_num = pd.to_numeric(props_df["price"], errors="coerce")
         today_props = props_df[
-            (props_df["edge"] >= min_edge_val) &
-            (~props_df.get("suppressed", pd.Series([False]*len(props_df))).fillna(False))
+            (props_df["edge"] >= min_edge_val)
+            & (~props_df.get("suppressed", pd.Series([False]*len(props_df))).fillna(False))
+            & (_price_num >= -400)
+            & (_price_num <= 600)
         ].copy().sort_values("edge", ascending=False)
 
         if not today_props.empty:
