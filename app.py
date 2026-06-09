@@ -994,8 +994,8 @@ with tabs[2]:
     </div>
     """, unsafe_allow_html=True)
 
-    # Recalculate button
-    rcol1, rcol2, _ = st.columns([2, 2, 6])
+    # Top control row: recalc button + min-edge selectbox + price-band sliders
+    rcol1, rcol2, rcol3, rcol4 = st.columns([2, 2, 3, 3])
     with rcol1:
         if st.button("🔄 Recalculate Edges", use_container_width=True):
             with st.spinner("Running edge engine..."):
@@ -1010,6 +1010,22 @@ with tabs[2]:
     with rcol2:
         min_edge_bb = st.selectbox("Min Edge", ["4% (Soft+)", "7% (Strong only)"], label_visibility="collapsed")
     min_edge_val = 0.07 if "7%" in min_edge_bb else 0.04
+
+    # Price band — the −1400 4th-line-grinder pricing user flagged was real
+    # but never bettable. These sliders let the user control which odds end
+    # up on screen without rerunning the model.
+    with rcol3:
+        max_chalk = st.slider(
+            "Cap chalk (max negative price)", -1000, -100, -400, 25, key="nhl_bb_max_chalk",
+            help="Hide any line priced lower (more juiced) than this. −400 hides extreme chalk; "
+                 "set to −1000 to show everything.",
+        )
+    with rcol4:
+        max_dog = st.slider(
+            "Cap longshots (max positive price)", 100, 1500, 600, 50, key="nhl_bb_max_dog",
+            help="Hide any line priced higher (longer odds) than this. Default 600 lets +500 dogs in "
+                 "but kills lottery tickets.",
+        )
 
     market_labels = {"h2h": "Moneyline", "spreads": "Puck Line", "totals": "Total", "team_totals": "Team Total"}
 
@@ -1149,16 +1165,15 @@ with tabs[2]:
 
     # ── Prop edges ────────────────────────────────────────────────────────────
     if not props_df.empty:
-        # Price-band gate: hide extreme chalk (-500 or worse) and longshot
-        # noise (+600 or more). Books price 4th-line grinders at -1000+ to
-        # NOT record an assist, which is mathematically real but never
-        # bettable; user flagged these surfacing as confusing 2026-06-09.
+        # Price-band gate uses live slider values (max_chalk / max_dog). Books
+        # price 4th-line grinders at -1000+ to NOT record an assist —
+        # mathematically real, never bettable. User flagged 2026-06-09.
         _price_num = pd.to_numeric(props_df["price"], errors="coerce")
         today_props = props_df[
             (props_df["edge"] >= min_edge_val)
             & (~props_df.get("suppressed", pd.Series([False]*len(props_df))).fillna(False))
-            & (_price_num >= -400)
-            & (_price_num <= 600)
+            & (_price_num >= max_chalk)
+            & (_price_num <= max_dog)
         ].copy().sort_values("edge", ascending=False)
 
         if not today_props.empty:
