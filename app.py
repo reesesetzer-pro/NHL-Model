@@ -19,6 +19,8 @@ import plotly.express as px
 from datetime import datetime, date, timedelta
 import pytz
 import os
+import sys
+from pathlib import Path
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -27,6 +29,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+_workspace = str(Path(__file__).resolve().parent.parent)
+if _workspace not in sys.path:
+    sys.path.insert(0, _workspace)
+try:
+    from gate_ui import render_streamlit_gate
+except ImportError:
+    def render_streamlit_gate(st_module, model: str) -> bool:
+        st_module.error(f"PAPER ONLY — {model} cannot verify the evidence gate in this deployment.")
+        return False
+render_streamlit_gate(st, "nhl_props")
 
 ET = pytz.timezone("America/New_York")
 

@@ -4,7 +4,20 @@ Kelly Criterion bet sizing.
 Returns full, half, and quarter Kelly as fraction of bankroll.
 """
 
+import sys
+from pathlib import Path
+
 from config import KELLY_BANKROLL
+
+try:
+    _WORKSPACE = next(p for p in Path(__file__).resolve().parents
+                      if (p / "evidence_gate.py").exists())
+    if str(_WORKSPACE) not in sys.path:
+        sys.path.insert(0, str(_WORKSPACE))
+    from evidence_gate import stake_or_zero
+except (ImportError, StopIteration):
+    def stake_or_zero(model: str, proposed: float) -> float:
+        return 0.0
 
 
 def kelly_criterion(
@@ -43,7 +56,11 @@ def kelly_criterion(
     half    = round(f_star * 0.5 * bankroll, 2)
     quarter = round(f_star * 0.25 * bankroll, 2)
 
-    return full, half, quarter
+    return (
+        stake_or_zero("nhl_props", full),
+        stake_or_zero("nhl_props", half),
+        stake_or_zero("nhl_props", quarter),
+    )
 
 
 def kelly_display(full: float, half: float, quarter: float, bankroll: float = KELLY_BANKROLL) -> str:
